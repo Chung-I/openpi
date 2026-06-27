@@ -12,7 +12,7 @@ import json
 import logging
 import pathlib
 
-from openpi.training.memory_labels import MemoryLabelConfig, MemoryLabelGenerator
+from openpi.training.memory_labels import Episode, MemoryLabelConfig, MemoryLabelGenerator
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ def main():
         )
 
     with open(args.episodes_file) as f:
-        episodes = json.load(f)
+        episodes = [Episode(goal=ep["goal"], subtasks=ep["subtasks"], success_flags=ep["success_flags"]) for ep in json.load(f)]
 
     logger.info(f"Generating labels for {len(episodes)} episodes with backend={args.backend}")
     generator = MemoryLabelGenerator(config)
@@ -54,7 +54,7 @@ def main():
     output_path = pathlib.Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:
-        json.dump(labels, f, indent=2)
+        json.dump([{"episode_id": label.episode_id, "memories": label.memories} for label in labels], f, indent=2)
 
     logger.info(f"Labels written to {output_path}")
 

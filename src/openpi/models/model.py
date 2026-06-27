@@ -114,9 +114,9 @@ class Observation(Generic[ArrayT]):
     # Language memory mask.
     tokenized_memory_mask: at.Bool[ArrayT, "*b m"] | None = None
     # Subtask instruction tokens (for LL policy conditioning).
-    tokenized_subtask: at.Int[ArrayT, "*b s"] | None = None
+    tokenized_subtask: at.Int[ArrayT, "*b ts"] | None = None
     # Subtask instruction mask.
-    tokenized_subtask_mask: at.Bool[ArrayT, "*b s"] | None = None
+    tokenized_subtask_mask: at.Bool[ArrayT, "*b ts"] | None = None
     # Video frames per camera: [*b, K, h, w, c].
     video_images: dict[str, at.Float[ArrayT, "*b k h w c"]] | None = None
     # Video image masks per camera.

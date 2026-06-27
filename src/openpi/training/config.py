@@ -16,6 +16,7 @@ import tyro
 import openpi.models.model as _model
 import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
+import openpi.models.pi0_mem_config as pi0_mem_config
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
@@ -159,6 +160,17 @@ class ModelTransformFactory(GroupFactory):
                             action_horizon=model_config.action_horizon,
                             action_dim=model_config.action_dim,
                         )
+                    ],
+                )
+            case _model.ModelType.PI0_MEM:
+                return _transforms.Group(
+                    inputs=[
+                        _transforms.InjectDefaultPrompt(self.default_prompt),
+                        _transforms.ResizeImages(224, 224),
+                        _transforms.TokenizePrompt(
+                            _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                        ),
+                        _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
                 )
 
@@ -963,6 +975,21 @@ _CONFIGS = [
         num_train_steps=10,
         overwrite=True,
         exp_name="debug_pi05",
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="pi0_mem_debug",
+        data=FakeDataConfig(),
+        batch_size=2,
+        model=pi0_mem_config.Pi0MEMConfig(
+            paligemma_variant="dummy",
+            action_expert_variant="dummy",
+            num_video_frames=2,
+        ),
+        save_interval=100,
+        overwrite=True,
+        exp_name="pi0_mem_debug",
+        num_train_steps=10,
         wandb_enabled=False,
     ),
     # RoboArena & PolaRiS configs.

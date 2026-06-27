@@ -1,5 +1,6 @@
 """Tests for VideoViT space-time separable attention module."""
 
+import flax.core
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -25,7 +26,7 @@ def test_single_frame_matches_siglip():
     siglip = _make_siglip()
     video_vit = VideoViTEncoder(
         config=config,
-        siglip_kwargs=dict(
+        siglip_kwargs=flax.core.FrozenDict(
             num_classes=32,
             variant="mu/2",
             pool_type="none",
@@ -61,7 +62,7 @@ def test_multi_frame_output_shape():
     config = VideoViTConfig(num_video_frames=4, temporal_attn_every_n_layers=1)
     video_vit = VideoViTEncoder(
         config=config,
-        siglip_kwargs=dict(
+        siglip_kwargs=flax.core.FrozenDict(
             num_classes=32,
             variant="mu/2",
             pool_type="none",
@@ -91,7 +92,7 @@ def test_temporal_causal_masking():
     config = VideoViTConfig(num_video_frames=3, temporal_attn_every_n_layers=1)
     video_vit = VideoViTEncoder(
         config=config,
-        siglip_kwargs=dict(
+        siglip_kwargs=flax.core.FrozenDict(
             # No num_classes: raw token embeddings are returned (non-zero init).
             # A zero-init head collapses every output to zero, hiding the signal.
             variant="mu/2",
@@ -127,7 +128,7 @@ def test_past_frame_influence():
     config = VideoViTConfig(num_video_frames=3, temporal_attn_every_n_layers=1)
     video_vit = VideoViTEncoder(
         config=config,
-        siglip_kwargs=dict(
+        siglip_kwargs=flax.core.FrozenDict(
             variant="mu/2",
             pool_type="none",
             scan=False,

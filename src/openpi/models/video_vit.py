@@ -10,9 +10,9 @@ when initialised with the same RNG (same parameter paths, no temporal ops).
 
 import dataclasses
 
+import flax.core
 import flax.linen as nn
 import jax.numpy as jnp
-import numpy as np
 
 import openpi.models.siglip as _siglip
 
@@ -51,61 +51,15 @@ def temporal_posemb_sincos(
     return jnp.concatenate([jnp.sin(angles), jnp.cos(angles) - 1.0], axis=-1)
 
 
-class TemporalAttention(nn.Module):
-    """Causal temporal self-attention across K frames for each spatial patch.
-
-    Receives tokens from all K frames flattened on the batch axis ([b*K, n, d]),
-    transposes to attend over the temporal axis per patch, then restores shape.
-    Only called when K > 1.
-    """
-
-    num_heads: int
-    dtype_mm: str = "float32"
-
-    @nn.compact
-    def __call__(self, x: jnp.ndarray, num_frames: int) -> jnp.ndarray:
-        """
-        Args:
-            x: [b*K, n, d] spatial tokens, all frames stacked on batch dim.
-            num_frames: K.
-
-        Returns:
-            [b*K, n, d] after causal temporal attention.
-        """
-        bk, n, d = x.shape
-        b = bk // num_frames
-        K = num_frames
-
-        # [b*K, n, d] → [b, n, K, d]
-        x_4d = x.reshape(b, K, n, d)
-        x_patch = jnp.transpose(x_4d, (0, 2, 1, 3))  # [b, n, K, d]
-        x_flat = x_patch.reshape(b * n, K, d)  # [b*n, K, d]
-
-        # Causal mask: each frame can attend to itself and earlier frames only
-        causal_mask = jnp.tril(jnp.ones((K, K), dtype=bool))  # [K, K]
-
-        y = nn.LayerNorm(dtype=self.dtype_mm)(x_flat)
-        y = nn.MultiHeadDotProductAttention(
-            num_heads=self.num_heads,
-            kernel_init=nn.initializers.xavier_uniform(),
-            deterministic=True,
-            dtype=self.dtype_mm,
-        )(y, y, mask=causal_mask)
-        x_flat = x_flat + y
-
-        # Restore [b*K, n, d]
-        x_patch = x_flat.reshape(b, n, K, d)
-        x_4d = jnp.transpose(x_patch, (0, 2, 1, 3))  # [b, K, n, d]
-        return x_4d.reshape(b * K, n, d)
-
-
 class VideoEncoder1DBlock(nn.Module):
     """Transformer encoder block with optional temporal attention.
 
     Parameter structure for spatial components matches SigLIP Encoder1DBlock
-    exactly when use_temporal_attn=False (same Flax auto-numbered names).
-    When use_temporal_attn=True, a named 'temporal_sa' sub-module is prepended
-    but the spatial component numbering is unaffected.
+    exactly (same Flax auto-numbered names: LayerNorm_0, MultiHeadDotProductAttention_0,
+    LayerNorm_1). When use_temporal_attn=True, the SAME LayerNorm and MHSA are
+    reused for temporal attention — no new learnable parameters are introduced.
+    Temporal attention is skipped entirely when num_frames=1, which preserves
+    numerical equivalence with standard SigLIP for K=1 inputs.
     """
 
     mlp_dim: int | None = None
@@ -124,23 +78,45 @@ class VideoEncoder1DBlock(nn.Module):
     ) -> tuple[jnp.ndarray, dict]:
         out = {}
 
-        # Temporal attention: explicit name 'temporal_sa' → doesn't shift
-        # the auto-numbered spatial layer names (LayerNorm_0, etc.)
-        if self.use_temporal_attn and num_frames > 1:
-            x = TemporalAttention(
-                num_heads=self.num_heads,
-                dtype_mm=self.dtype_mm,
-                name="temporal_sa",
-            )(x, num_frames)
-
-        # Spatial self-attention  (same names as SigLIP Encoder1DBlock)
-        y = nn.LayerNorm(dtype=self.dtype_mm)(x)
-        y = out["sa"] = nn.MultiHeadDotProductAttention(
+        # Shared LayerNorm and MHSA: first instantiated here, first CALLED either
+        # in the temporal path below (when active) or in the spatial path.
+        # Flax @nn.compact assigns the auto-name at first call and reuses it on
+        # subsequent calls to the SAME instance, so both paths share parameters.
+        ln = nn.LayerNorm(dtype=self.dtype_mm)
+        attn = nn.MultiHeadDotProductAttention(
             num_heads=self.num_heads,
             kernel_init=nn.initializers.xavier_uniform(),
             deterministic=deterministic,
             dtype=self.dtype_mm,
-        )(y, y)
+        )
+
+        # Temporal self-attention: reuses ln/attn weights, causal mask over K frames.
+        # Guarded by num_frames > 1 so K=1 skips this block entirely.
+        if self.use_temporal_attn and num_frames > 1:
+            bk, n, d = x.shape
+            b = bk // num_frames
+            K = num_frames
+
+            # [b*K, n, d] → [b*n, K, d]: attend over temporal axis per patch
+            x_4d = x.reshape(b, K, n, d)
+            x_patch = jnp.transpose(x_4d, (0, 2, 1, 3))  # [b, n, K, d]
+            x_flat = x_patch.reshape(b * n, K, d)  # [b*n, K, d]
+
+            # Causal mask [1, 1, K, K]: each frame attends to itself and earlier frames
+            causal_mask = jnp.tril(jnp.ones((K, K), dtype=bool))[None, None, :, :]
+
+            x_flat_norm = ln(x_flat)
+            y = attn(x_flat_norm, x_flat_norm, mask=causal_mask)
+            x_flat = x_flat + y
+
+            # Restore [b*K, n, d]
+            x_patch = x_flat.reshape(b, n, K, d)
+            x_4d = jnp.transpose(x_patch, (0, 2, 1, 3))  # [b, K, n, d]
+            x = x_4d.reshape(b * K, n, d)
+
+        # Spatial self-attention (same ln/attn params as temporal path above)
+        x_norm = ln(x)
+        y = out["sa"] = attn(x_norm, x_norm)
         y = nn.Dropout(rate=self.dropout)(y, deterministic)
         x = out["+sa"] = x + y
 
@@ -232,8 +208,8 @@ class VideoViTEncoder(nn.Module):
     """
 
     config: VideoViTConfig
-    # kwargs forwarded to decode_variant + used as SigLIP config
-    siglip_kwargs: dict
+    # FrozenDict is hashable, satisfying Flax's module-identity requirements.
+    siglip_kwargs: flax.core.FrozenDict
 
     @nn.compact
     def __call__(

@@ -385,6 +385,17 @@ class Module(nn.Module):
     def embed(self, tokens: at.Int[at.Array, "b t"]) -> at.Float[at.Array, "b t d"]:
         return self.embedder.encode(tokens).astype(self.embed_dtype)
 
+    def decode_logits(self, x):
+        """Project hidden states to vocabulary logits via the shared embedding table.
+
+        Args:
+            x: Float array of shape [b, t, d] — normalized hidden states.
+
+        Returns:
+            Float32 array of shape [b, t, vocab_size] — unnormalized logits.
+        """
+        return self.embedder.decode(x).astype(jnp.float32)
+
     @at.typecheck
     def __call__(
         self,

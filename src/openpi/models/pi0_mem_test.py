@@ -1,5 +1,6 @@
 import flax.nnx as nnx
 import jax
+import jax.numpy as jnp
 
 from openpi.models import model as _model
 from openpi.models.pi0_mem_config import Pi0MEMConfig
@@ -34,3 +35,24 @@ def test_pi0_mem_sample_actions():
 
     actions = nnx_utils.module_jit(model.sample_actions)(key, obs, num_steps=2)
     assert actions.shape == (batch_size, config.action_horizon, config.action_dim)
+
+
+def test_pi0_mem_hl_loss():
+    key = jax.random.key(0)
+    config = Pi0MEMConfig(
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+    )
+    model = config.create(key)
+
+    batch_size = 2
+    obs = config.fake_obs(batch_size)
+
+    # Target tokens for HL: subtask + memory text (tokenized)
+    target_len = 32
+    target_tokens = jnp.ones((batch_size, target_len), dtype=jnp.int32)
+    target_mask = jnp.ones((batch_size, target_len), dtype=jnp.bool_)
+
+    loss = nnx_utils.module_jit(model.compute_loss_hl)(key, obs, target_tokens, target_mask)
+    assert loss.shape == (batch_size,)
+    assert jnp.all(jnp.isfinite(loss))

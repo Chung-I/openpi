@@ -281,7 +281,7 @@ class Pi0MEM(_model.BaseModel):
 
         # Build masks: prefix is bidirectional, target forms a single causal AR block
         # (target tokens can attend to each other and all prefix tokens)
-        suffix_ar_mask = jnp.array([True] + [False] * (target_tokens.shape[1] - 1))
+        suffix_ar_mask = jnp.ones(target_tokens.shape[1], dtype=jnp.bool_)
         input_mask = jnp.concatenate([prefix_mask, target_mask], axis=1)
         full_ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
         attn_mask = make_attn_mask(input_mask, full_ar_mask)
@@ -382,7 +382,7 @@ class Pi0MEM(_model.BaseModel):
         hl_targets: at.Int[at.Array, "b t"] | None = None,
         train: bool = False,
     ) -> at.Float[at.Array, "*b ah"]:
-        preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
+        preprocess_rng, noise_rng, time_rng, hl_rng = jax.random.split(rng, 4)
         observation_ll = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
         batch_shape = actions.shape[:-2]
@@ -413,7 +413,7 @@ class Pi0MEM(_model.BaseModel):
         if hl_targets is not None and self.config.hl_loss_weight > 0:
             hl_targets_mask = jnp.ones_like(hl_targets, dtype=jnp.bool_)
             hl_loss = self.compute_loss_hl(
-                rng, observation, hl_targets, hl_targets_mask, train=train
+                hl_rng, observation, hl_targets, hl_targets_mask, train=train
             )  # [b]
             # hl_loss is [b]; ll_loss is [b, ah] — expand for broadcasting
             total_loss = (

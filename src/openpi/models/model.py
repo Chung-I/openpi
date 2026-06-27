@@ -33,6 +33,7 @@ class ModelType(enum.Enum):
     PI0 = "pi0"
     PI0_FAST = "pi0_fast"
     PI05 = "pi05"
+    PI0_MEM = "pi0_mem"
 
 
 # The model always expects these images
@@ -106,6 +107,23 @@ class Observation(Generic[ArrayT]):
     # Token loss mask (for FAST autoregressive model).
     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
 
+    # MEM-specific fields.
+
+    # Language memory tokens (for conditioning).
+    tokenized_memory: at.Int[ArrayT, "*b m"] | None = None
+    # Language memory mask.
+    tokenized_memory_mask: at.Bool[ArrayT, "*b m"] | None = None
+    # Subtask instruction tokens (for LL policy conditioning).
+    tokenized_subtask: at.Int[ArrayT, "*b s"] | None = None
+    # Subtask instruction mask.
+    tokenized_subtask_mask: at.Bool[ArrayT, "*b s"] | None = None
+    # Video frames per camera: [*b, K, h, w, c].
+    video_images: dict[str, at.Float[ArrayT, "*b k h w c"]] | None = None
+    # Video image masks per camera.
+    video_image_masks: dict[str, at.Bool[ArrayT, "*b k"]] | None = None
+    # Proprioceptive state history: [*b, K, s].
+    video_states: at.Float[ArrayT, "*b k s"] | None = None
+
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
         """This method defines the mapping between unstructured data (i.e., nested dict) to the structured Observation format."""
@@ -126,6 +144,13 @@ class Observation(Generic[ArrayT]):
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
+            tokenized_memory=data.get("tokenized_memory"),
+            tokenized_memory_mask=data.get("tokenized_memory_mask"),
+            tokenized_subtask=data.get("tokenized_subtask"),
+            tokenized_subtask_mask=data.get("tokenized_subtask_mask"),
+            video_images=data.get("video_image"),
+            video_image_masks=data.get("video_image_mask"),
+            video_states=data.get("video_states"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -133,6 +158,12 @@ class Observation(Generic[ArrayT]):
         result = dataclasses.asdict(self)
         result["image"] = result.pop("images")
         result["image_mask"] = result.pop("image_masks")
+        if result.get("video_images") is not None:
+            result["video_image"] = result.pop("video_images")
+            result["video_image_mask"] = result.pop("video_image_masks")
+        else:
+            result.pop("video_images", None)
+            result.pop("video_image_masks", None)
         return result
 
 
@@ -205,6 +236,13 @@ def preprocess_observation(
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
+        tokenized_memory=observation.tokenized_memory,
+        tokenized_memory_mask=observation.tokenized_memory_mask,
+        tokenized_subtask=observation.tokenized_subtask,
+        tokenized_subtask_mask=observation.tokenized_subtask_mask,
+        video_images=observation.video_images,
+        video_image_masks=observation.video_image_masks,
+        video_states=observation.video_states,
     )
 
 

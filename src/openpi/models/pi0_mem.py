@@ -366,6 +366,9 @@ class Pi0MEM(_model.BaseModel):
             next_token = jnp.argmax(logits[:, 0, :], axis=-1, keepdims=True)  # [b, 1]
             generated = jnp.concatenate([generated, next_token], axis=1)
 
+            if jnp.all(next_token == _PALIGEMMA_EOS_TOKEN_ID):
+                break
+
         # Return generated tokens, stripping the leading BOS token
         return generated[:, 1:]
 
@@ -376,10 +379,11 @@ class Pi0MEM(_model.BaseModel):
         observation: _model.Observation,
         actions: _model.Actions,
         *,
+        hl_targets: at.Int[at.Array, "b t"] | None = None,
         train: bool = False,
     ) -> at.Float[at.Array, "*b ah"]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
-        observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
+        observation_ll = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
@@ -389,9 +393,9 @@ class Pi0MEM(_model.BaseModel):
         u_t = noise - actions
 
         # One forward pass over the concatenated prefix + suffix
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix_ll(observation)
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix_ll(observation_ll)
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix_ll(
-            observation, x_t, time
+            observation_ll, x_t, time
         )
         input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
         ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
@@ -404,7 +408,21 @@ class Pi0MEM(_model.BaseModel):
             adarms_cond=[None, adarms_cond],
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
-        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        ll_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)  # [*b, ah]
+
+        if hl_targets is not None and self.config.hl_loss_weight > 0:
+            hl_targets_mask = jnp.ones_like(hl_targets, dtype=jnp.bool_)
+            hl_loss = self.compute_loss_hl(
+                rng, observation, hl_targets, hl_targets_mask, train=train
+            )  # [b]
+            # hl_loss is [b]; ll_loss is [b, ah] — expand for broadcasting
+            total_loss = (
+                self.config.ll_loss_weight * ll_loss
+                + self.config.hl_loss_weight * hl_loss[:, None]
+            )
+        else:
+            total_loss = ll_loss
+        return total_loss
 
     @override
     def sample_actions(

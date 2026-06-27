@@ -25,19 +25,40 @@ Compressed memory summary:"""
 
 
 @dataclasses.dataclass
+class Episode:
+    goal: str
+    subtasks: list[str]  # ordered subtask descriptions
+    success_flags: list[bool]  # per-subtask success/failure
+
+
+@dataclasses.dataclass
+class MemoryLabels:
+    episode_id: str
+    memories: list[str]  # one compressed memory per timestep
+
+
+@dataclasses.dataclass
 class MemoryLabelConfig:
     backend: Literal["claude", "openai", "local", "mock"] = "claude"
     model: str = "claude-sonnet-4-20250514"
     max_memory_tokens: int = 128
     batch_size: int = 32
-    api_key_env: str = "ANTHROPIC_API_KEY"
+    api_key_env: str = ""
+
+    @property
+    def resolved_api_key_env(self) -> str:
+        if self.api_key_env:  # user explicitly set it
+            return self.api_key_env
+        if self.backend == "openai":
+            return "OPENAI_API_KEY"
+        return "ANTHROPIC_API_KEY"
 
 
-def _format_subtask_sequence(subtasks: list[dict], up_to_index: int) -> str:
+def _format_subtask_sequence(subtasks: list[str], success_flags: list[bool], up_to_index: int) -> str:
     lines = []
-    for i, st in enumerate(subtasks[: up_to_index + 1]):
-        status = "SUCCESS" if st["success"] else "FAILED"
-        lines.append(f"{i+1}. [{status}] {st['text']} (t={st['timestamp']:.1f}s)")
+    for i in range(up_to_index + 1):
+        status = "SUCCESS" if success_flags[i] else "FAILED"
+        lines.append(f"{i+1}. [{status}] {subtasks[i]}")
     return "\n".join(lines)
 
 
@@ -57,13 +78,13 @@ class MemoryLabelGenerator:
 
             import anthropic
 
-            self._client = anthropic.Anthropic(api_key=os.environ.get(self.config.api_key_env))
+            self._client = anthropic.Anthropic(api_key=os.environ.get(self.config.resolved_api_key_env))
         elif self.config.backend == "openai":
             import os
 
             import openai
 
-            self._client = openai.OpenAI(api_key=os.environ.get(self.config.api_key_env))
+            self._client = openai.OpenAI(api_key=os.environ.get(self.config.resolved_api_key_env))
         elif self.config.backend == "local":
             raise NotImplementedError("Local LLM backend not yet implemented")
         return self._client
@@ -94,24 +115,22 @@ class MemoryLabelGenerator:
 
         raise ValueError(f"Unknown backend: {self.config.backend}")
 
-    def generate_labels(self, episodes: list[dict]) -> list[list[str]]:
+    def generate_labels(self, episodes: list[Episode]) -> list[MemoryLabels]:
         """Generate memory labels for each timestep in each episode.
 
         Args:
-            episodes: List of episode dicts, each with 'goal' and 'subtasks' keys.
-                     'subtasks' is a list of dicts with 'text', 'success', 'timestamp'.
+            episodes: List of Episode objects with goal, subtasks, and success_flags.
 
         Returns:
-            List of lists of memory strings, one per subtask per episode.
+            List of MemoryLabels, one per episode, each containing one compressed
+            memory string per subtask timestep.
         """
         all_labels = []
-        for episode in episodes:
-            goal = episode["goal"]
-            subtasks = episode["subtasks"]
+        for idx, episode in enumerate(episodes):
             episode_labels = []
-            for i in range(len(subtasks)):
-                seq = _format_subtask_sequence(subtasks, i)
-                memory = self._generate_single(goal, seq)
+            for i in range(len(episode.subtasks)):
+                seq = _format_subtask_sequence(episode.subtasks, episode.success_flags, i)
+                memory = self._generate_single(episode.goal, seq)
                 episode_labels.append(memory)
-            all_labels.append(episode_labels)
+            all_labels.append(MemoryLabels(episode_id=str(idx), memories=episode_labels))
         return all_labels

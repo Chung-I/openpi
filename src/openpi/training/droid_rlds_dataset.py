@@ -11,6 +11,7 @@ from enum import Enum
 from enum import auto
 import json
 import logging
+import os
 from pathlib import Path
 
 import tqdm
@@ -64,7 +65,10 @@ class DroidRldsDataset:
         def prepare_single_dataset(dataset_cfg: RLDSDataset):
             # ds_name, version = dataset_name.split(":")
             ds_name, version = dataset_cfg.name, dataset_cfg.version
-            builder = tfds.builder(ds_name, data_dir=data_dir, version=version)
+            try:
+                builder = tfds.builder(ds_name, data_dir=data_dir, version=version)
+            except Exception:
+                builder = tfds.builder_from_directory(os.path.join(data_dir, ds_name, version))
             dataset = dl.DLataset.from_rlds(
                 builder, split="train", shuffle=shuffle, num_parallel_reads=num_parallel_reads
             )

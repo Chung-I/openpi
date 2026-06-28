@@ -1006,8 +1006,16 @@ _CONFIGS = [
             repo_id="droid",
             rlds_data_dir="/work/roboleon1295/droid-rlds",
             action_space=droid_rlds_dataset.DroidActionSpace.JOINT_POSITION,
+            datasets=(
+                droid_rlds_dataset.RLDSDataset(
+                    name="droid",
+                    version="1.0.1",
+                    weight=1.0,
+                    filter_dict_path="/work/roboleon1295/openpi/droid_sample_ranges_v1_0_1.json",
+                ),
+            ),
             assets=AssetsConfig(
-                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets/",
+                assets_dir="/work/roboleon1295/openpi/assets/",
                 asset_id="droid",
             ),
         ),

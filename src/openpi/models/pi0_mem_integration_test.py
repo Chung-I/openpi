@@ -119,6 +119,25 @@ def test_ll_loss_is_differentiable():
     )
 
 
+def test_pi0_legacy_mode():
+    """Pi05=False backward compat: model creates and produces finite LL loss."""
+    key = jax.random.key(0)
+    config = Pi0MEMConfig(
+        pi05=False,
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+        num_video_frames=2,
+    )
+    model = config.create(key)
+
+    batch_size = 1
+    obs, act = config.fake_obs(batch_size), config.fake_act(batch_size)
+
+    ll_loss = nnx_utils.module_jit(model.compute_loss)(key, obs, act)
+    assert ll_loss.shape == (batch_size, config.action_horizon)
+    assert jnp.all(jnp.isfinite(ll_loss))
+
+
 def test_overfitting_single_batch():
     """Model should overfit a single fixed batch: final loss < 50% of initial loss."""
     training_config = get_config("pi0_mem_debug")

@@ -81,7 +81,7 @@ class Pi0MEM(_model.BaseModel):
                     num_classes=paligemma_config.width,
                     variant="So400m/14",
                     pool_type="none",
-                    scan=False,
+                    scan=False,  # per-layer temporal attention control uses a Python loop
                     dtype_mm=config.dtype,
                 ),
             )
@@ -184,6 +184,14 @@ class Pi0MEM(_model.BaseModel):
         at.Bool[at.Array, " s"],
         at.Float[at.Array, "b emb"] | None,
     ]:
+        """Embed suffix for LL policy: K state tokens + action tokens.
+
+        AR boundary: first state token starts a new AR block (prefix cannot attend
+        to suffix). Remaining state tokens share that block. Action tokens form
+        their own block (attend to state + each other).
+
+        Returns adarms_cond when pi05=True (adaRMSNorm path), None otherwise.
+        """
         input_mask = []
         ar_mask = []
         tokens = []
@@ -195,6 +203,7 @@ class Pi0MEM(_model.BaseModel):
             state_tokens = self.state_proj(obs.state)[:, None, :]  # [b, 1, d_expert]
         tokens.append(state_tokens)
         input_mask.append(jnp.ones(state_tokens.shape[:2], dtype=jnp.bool_))
+        # First state token is the AR boundary; remaining share the same block.
         ar_mask += [True] + [False] * (state_tokens.shape[1] - 1)
 
         # --- Action tokens with flow-matching timestep ---
@@ -223,6 +232,7 @@ class Pi0MEM(_model.BaseModel):
 
         tokens.append(action_expert_tokens)
         input_mask.append(jnp.ones(action_expert_tokens.shape[:2], dtype=jnp.bool_))
+        # Action tokens form a new AR block; they can attend to state tokens.
         ar_mask += [True] + [False] * (self.action_horizon - 1)
 
         tokens = jnp.concatenate(tokens, axis=1)

@@ -1,13 +1,16 @@
-"""Pi0MEM: Memory-augmented Pi0 model with multi-frame video observation.
+"""Pi0MEM: Memory-augmented Pi0/Pi0.5 model with multi-frame video observation.
 
 The low-level (LL) policy generates action chunks via flow matching, conditioned
 on video observations + subtask instruction + episodic memory.
 
-Architecture differences from Pi0:
+Architecture differences from Pi0/Pi0.5:
 - VideoViTEncoder instead of standard SigLIP for image encoding (multi-frame)
 - K proprioceptive state tokens (one per video frame) instead of 1
 - Subtask and memory tokens in the prefix (from HL policy)
 - AR boundary is at the first state token (K tokens, not 1)
+
+When pi05=True (default), uses adaRMSNorm timestep injection matching pi0.5.
+When pi05=False, uses the legacy MLP-concat path matching pi0.
 """
 
 import logging
@@ -39,6 +42,7 @@ class Pi0MEM(_model.BaseModel):
     def __init__(self, config: pi0_mem_config.Pi0MEMConfig, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.config = config
+        self.pi05 = config.pi05
 
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
@@ -48,9 +52,14 @@ class Pi0MEM(_model.BaseModel):
             _gemma.Module(
                 configs=[paligemma_config, action_expert_config],
                 embed_dtype=config.dtype,
+                adarms=config.pi05,
             )
         )
-        llm.lazy_init(rngs=rngs, method="init", use_adarms=[False, False])
+        llm.lazy_init(
+            rngs=rngs,
+            method="init",
+            use_adarms=[False, True] if config.pi05 else [False, False],
+        )
 
         # Single-frame image encoder (fallback when video_images is absent)
         img = nnx_bridge.ToNNX(
@@ -65,7 +74,6 @@ class Pi0MEM(_model.BaseModel):
         img.lazy_init(next(iter(config.fake_obs().images.values())), train=False, rngs=rngs)
 
         # Video encoder (LL policy) — space-time separable attention over K frames
-        # scan=False required: per-layer temporal attention control uses a Python loop
         video_img = nnx_bridge.ToNNX(
             VideoViTEncoder(
                 config=config.video_vit_config,
@@ -86,12 +94,16 @@ class Pi0MEM(_model.BaseModel):
         # LL policy projections (action expert width)
         self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
         self.action_in_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
-        self.action_time_mlp_in = nnx.Linear(
-            2 * action_expert_config.width, action_expert_config.width, rngs=rngs
-        )
-        self.action_time_mlp_out = nnx.Linear(
-            action_expert_config.width, action_expert_config.width, rngs=rngs
-        )
+        if config.pi05:
+            self.time_mlp_in = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
+            self.time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
+        else:
+            self.action_time_mlp_in = nnx.Linear(
+                2 * action_expert_config.width, action_expert_config.width, rngs=rngs
+            )
+            self.action_time_mlp_out = nnx.Linear(
+                action_expert_config.width, action_expert_config.width, rngs=rngs
+            )
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
 
         # Set by model.train() / model.eval().
@@ -172,12 +184,6 @@ class Pi0MEM(_model.BaseModel):
         at.Bool[at.Array, " s"],
         at.Float[at.Array, "b emb"] | None,
     ]:
-        """Embed suffix for LL policy: K state tokens + action tokens.
-
-        AR boundary: first state token is the AR boundary (prefix cannot attend
-        to suffix). Remaining state tokens share that AR block. Action tokens
-        form their own block (attend to state + each other).
-        """
         input_mask = []
         ar_mask = []
         tokens = []
@@ -189,28 +195,40 @@ class Pi0MEM(_model.BaseModel):
             state_tokens = self.state_proj(obs.state)[:, None, :]  # [b, 1, d_expert]
         tokens.append(state_tokens)
         input_mask.append(jnp.ones(state_tokens.shape[:2], dtype=jnp.bool_))
-        # First state token is the AR boundary; remaining share the same block.
         ar_mask += [True] + [False] * (state_tokens.shape[1] - 1)
 
-        # --- Action tokens with flow-matching timestep mixing ---
+        # --- Action tokens with flow-matching timestep ---
         action_tokens = self.action_in_proj(noisy_actions)  # [b, H, d_expert]
         time_emb = posemb_sincos(
             timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0
         )  # [b, d_expert]
-        time_tokens = einops.repeat(time_emb, "b emb -> b s emb", s=self.action_horizon)
-        action_time_tokens = jnp.concatenate([action_tokens, time_tokens], axis=-1)
-        action_time_tokens = self.action_time_mlp_in(action_time_tokens)
-        action_time_tokens = nnx.swish(action_time_tokens)
-        action_time_tokens = self.action_time_mlp_out(action_time_tokens)
-        tokens.append(action_time_tokens)
-        input_mask.append(jnp.ones(action_time_tokens.shape[:2], dtype=jnp.bool_))
-        # Action tokens form a new AR block; they can attend to state tokens.
+
+        if self.pi05:
+            # adaRMSNorm path: time MLP produces conditioning signal
+            time_emb = self.time_mlp_in(time_emb)
+            time_emb = nnx.swish(time_emb)
+            time_emb = self.time_mlp_out(time_emb)
+            time_emb = nnx.swish(time_emb)
+            action_expert_tokens = action_tokens
+            adarms_cond = time_emb
+        else:
+            # MLP-concat path (pi0 legacy)
+            time_tokens = einops.repeat(time_emb, "b emb -> b s emb", s=self.action_horizon)
+            action_time_tokens = jnp.concatenate([action_tokens, time_tokens], axis=-1)
+            action_time_tokens = self.action_time_mlp_in(action_time_tokens)
+            action_time_tokens = nnx.swish(action_time_tokens)
+            action_time_tokens = self.action_time_mlp_out(action_time_tokens)
+            action_expert_tokens = action_time_tokens
+            adarms_cond = None
+
+        tokens.append(action_expert_tokens)
+        input_mask.append(jnp.ones(action_expert_tokens.shape[:2], dtype=jnp.bool_))
         ar_mask += [True] + [False] * (self.action_horizon - 1)
 
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
         ar_mask = jnp.array(ar_mask)
-        return tokens, input_mask, ar_mask, None  # No adaRMS for base MEM model
+        return tokens, input_mask, ar_mask, adarms_cond
 
     # -------------------------------------------------------------------------
     # HL (high-level) policy: single-frame SigLIP + memory → subtask + memory text

@@ -5,16 +5,19 @@ These tests verify that the full MEM pipeline works together:
   - Forward + backward pass (LL policy)
   - HL policy loss
   - Combined HL + LL loss
-  - Gradient flow through the LL loss
+  - Gradient flow through the LL loss (with finiteness check)
+  - Overfitting on a single batch (loss decreases significantly)
 """
 
 import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
+import optax
 
 from openpi.models import model as _model
 from openpi.models.pi0_mem_config import Pi0MEMConfig
 from openpi.shared import nnx_utils
+from openpi.training.config import get_config
 
 
 def test_config_registered():
@@ -107,7 +110,52 @@ def test_ll_loss_is_differentiable():
 
     grads = jax.grad(loss_fn)(params)
 
-    # Verify at least some gradients are non-zero.
+    # Verify at least some gradients are non-zero and all are finite.
     flat_grads = jax.tree.leaves(grads)
-    has_nonzero = any(jnp.any(g != 0) for g in flat_grads if hasattr(g, "__array__"))
+    has_nonzero = any(jnp.any(g != 0) for g in flat_grads if isinstance(g, jax.Array))
     assert has_nonzero, "Expected some non-zero gradients"
+    assert all(jnp.all(jnp.isfinite(g)) for g in flat_grads if isinstance(g, jax.Array)), (
+        "Expected all gradients to be finite"
+    )
+
+
+def test_overfitting_single_batch():
+    """Model should overfit a single fixed batch: final loss < 50% of initial loss."""
+    training_config = get_config("pi0_mem_debug")
+    model_config: Pi0MEMConfig = training_config.model  # type: ignore[assignment]
+
+    key = jax.random.key(42)
+    model = model_config.create(key)
+
+    batch_size = 1
+    obs = model_config.fake_obs(batch_size)
+    act = model_config.fake_act(batch_size)
+
+    graphdef, params = nnx.split(model)
+
+    optimizer = optax.adam(1e-3)
+    opt_state = optimizer.init(params)
+
+    @jax.jit
+    def train_step(params, opt_state):
+        def loss_fn(p):
+            m = nnx.merge(graphdef, p)
+            loss = m.compute_loss(key, obs, act)
+            return jnp.mean(loss)
+
+        loss, grads = jax.value_and_grad(loss_fn)(params)
+        updates, new_opt_state = optimizer.update(grads, opt_state)
+        new_params = optax.apply_updates(params, updates)
+        return loss, new_params, new_opt_state
+
+    initial_loss, params, opt_state = train_step(params, opt_state)
+
+    for _ in range(99):
+        final_loss, params, opt_state = train_step(params, opt_state)
+
+    assert float(final_loss) < 0.5 * float(initial_loss), (
+        f"Expected final loss ({float(final_loss):.4f}) to be less than 50% of "
+        f"initial loss ({float(initial_loss):.4f})"
+    )
+
+

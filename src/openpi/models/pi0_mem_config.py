@@ -22,7 +22,11 @@ class Pi0MEMConfig(_model.BaseModelConfig):
     # Set model-specific defaults.
     action_dim: int = 32
     action_horizon: int = 50
-    max_token_len: int = 48
+    max_token_len: int = None  # type: ignore
+
+    # Pi0.5 mode: adaRMSNorm timestep injection in action expert.
+    pi05: bool = True
+    discrete_state_input: bool = False
 
     # MEM-specific config.
     num_video_frames: int = 6
@@ -31,6 +35,10 @@ class Pi0MEMConfig(_model.BaseModelConfig):
     max_subtask_tokens: int = 64
     hl_loss_weight: float = 1.0
     ll_loss_weight: float = 1.0
+
+    def __post_init__(self):
+        if self.max_token_len is None:
+            object.__setattr__(self, "max_token_len", 200)
 
     @property
     def video_vit_config(self) -> VideoViTConfig:

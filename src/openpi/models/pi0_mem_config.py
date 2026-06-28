@@ -39,6 +39,8 @@ class Pi0MEMConfig(_model.BaseModelConfig):
     def __post_init__(self):
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
+        if self.discrete_state_input:
+            raise ValueError("MEM requires continuous state input (discrete_state_input must be False)")
 
     @property
     def video_vit_config(self) -> VideoViTConfig:

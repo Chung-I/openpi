@@ -1032,6 +1032,7 @@ _CONFIGS = [
             decay_steps=1_000_000,
             decay_lr=5e-5,
         ),
+        fsdp_devices=4,
         num_train_steps=100_000,
         batch_size=128,
         grad_accum_steps=2,

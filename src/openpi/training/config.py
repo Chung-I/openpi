@@ -998,6 +998,7 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi0_mem_droid_stream",
+        exp_name="pi0_mem_droid_stream",
         model=pi0_mem_config.Pi0MEMConfig(
             pi05=True,
             action_dim=32,

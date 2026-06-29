@@ -113,14 +113,16 @@ def _download_gsutil(url: str, local_path: pathlib.Path, **kwargs) -> None:
         )
         _download_fsspec(url, local_path, **kwargs)
         return
-    local_path.mkdir(parents=True, exist_ok=True)
     try:
+        local_path.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             ["gsutil", "-m", "cp", "-r", f"{url}/*", str(local_path)],
             check=True,
         )
     except (OSError, subprocess.SubprocessError):
         logger.warning("gsutil failed, falling back to gcsfs.")
+        if local_path.is_dir():
+            shutil.rmtree(local_path)
         _download_fsspec(url, local_path, **kwargs)
 
 

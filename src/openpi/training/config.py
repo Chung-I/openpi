@@ -1024,7 +1024,7 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "gs://openpi-assets/checkpoints/pi05_base/params",
-            missing_regex=".*(lora|state_proj).*",
+            missing_regex=".*(lora|state_proj|video_img).*",
         ),
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,

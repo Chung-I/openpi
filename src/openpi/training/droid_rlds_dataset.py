@@ -63,28 +63,14 @@ class DroidRldsDataset:
         assert sum(dataset.weight for dataset in datasets) == 1.0, "Dataset weights must sum to 1.0"
 
         def prepare_single_dataset(dataset_cfg: RLDSDataset):
-            # ds_name, version = dataset_name.split(":")
             ds_name, version = dataset_cfg.name, dataset_cfg.version
             try:
                 builder = tfds.builder(ds_name, data_dir=data_dir, version=version)
             except Exception:
                 builder = tfds.builder_from_directory(os.path.join(data_dir, ds_name, version))
 
-            split = "train"
-            data_path = os.path.join(data_dir, ds_name, version)
-            if os.path.isdir(data_path):
-                total_shards = len(builder.info.splits["train"].shard_lengths)
-                present = sum(
-                    1 for i in range(total_shards)
-                    if os.path.exists(os.path.join(data_path, f"{ds_name}_101-train.tfrecord-{i:05d}-of-{total_shards:05d}"))
-                )
-                if present < total_shards:
-                    pct = int(present / total_shards * 100)
-                    split = f"train[:{pct}%]"
-                    logging.info(f"Partial dataset: {present}/{total_shards} shards, using split='{split}'")
-
             dataset = dl.DLataset.from_rlds(
-                builder, split=split, shuffle=shuffle, num_parallel_reads=num_parallel_reads
+                builder, split="train", shuffle=shuffle, num_parallel_reads=num_parallel_reads
             )
 
             # Filter out any unsuccessful trajectories -- we use the file name to check this

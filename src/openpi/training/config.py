@@ -518,6 +518,8 @@ class TrainConfig:
     seed: int = 42
     # Global batch size.
     batch_size: int = 32
+    # Gradient accumulation steps. Effective batch = batch_size * grad_accum_steps.
+    grad_accum_steps: int = 1
     # Number of workers to use for the data loader. Increasing this number will speed up data loading but
     # will increase memory and CPU usage.
     num_workers: int = 2
@@ -1029,6 +1031,7 @@ _CONFIGS = [
         ),
         num_train_steps=100_000,
         batch_size=128,
+        grad_accum_steps=2,
         log_interval=100,
         save_interval=5000,
         keep_period=10_000,

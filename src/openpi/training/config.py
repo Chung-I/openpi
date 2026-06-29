@@ -518,6 +518,8 @@ class TrainConfig:
     seed: int = 42
     # Global batch size.
     batch_size: int = 32
+    # Number of gradient accumulation steps. Effective batch size = batch_size * grad_accum_steps.
+    grad_accum_steps: int = 1
     # Number of workers to use for the data loader. Increasing this number will speed up data loading but
     # will increase memory and CPU usage.
     num_workers: int = 2
@@ -1028,6 +1030,46 @@ _CONFIGS = [
         ),
         num_train_steps=100_000,
         batch_size=256,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=0,
+    ),
+    TrainConfig(
+        name="pi0_mem_droid_4gpu",
+        model=pi0_mem_config.Pi0MEMConfig(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            num_video_frames=6,
+        ),
+        data=RLDSDroidDataConfig(
+            repo_id="droid",
+            rlds_data_dir="/work/roboleon1295/droid-rlds",
+            action_space=droid_rlds_dataset.DroidActionSpace.JOINT_POSITION,
+            datasets=(
+                droid_rlds_dataset.RLDSDataset(
+                    name="droid",
+                    version="1.0.1",
+                    weight=1.0,
+                    filter_dict_path="/work/roboleon1295/openpi/droid_sample_ranges_v1_0_1.json",
+                ),
+            ),
+            assets=AssetsConfig(
+                assets_dir="/work/roboleon1295/openpi/assets/",
+                asset_id="droid",
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        num_train_steps=100_000,
+        batch_size=128,
+        grad_accum_steps=2,
         log_interval=100,
         save_interval=5000,
         keep_period=10_000,

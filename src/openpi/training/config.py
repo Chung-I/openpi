@@ -173,6 +173,9 @@ class ModelTransformFactory(GroupFactory):
                             discrete_state_input=model_config.discrete_state_input,
                         ),
                         _transforms.PadStatesAndActions(model_config.action_dim),
+                        _transforms.TokenizeFASTActions(
+                            _tokenizer.FASTTokenizer(model_config.max_action_tokens),
+                        ),
                     ],
                 )
 
@@ -993,6 +996,28 @@ _CONFIGS = [
         save_interval=100,
         overwrite=True,
         exp_name="pi0_mem_debug",
+        num_train_steps=10,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="pi0_mem_lora_debug",
+        data=FakeDataConfig(),
+        batch_size=2,
+        model=pi0_mem_config.Pi0MEMConfig(
+            paligemma_variant="dummy",
+            action_expert_variant="dummy",
+            num_video_frames=2,
+            lora=True,
+        ),
+        freeze_filter=pi0_mem_config.Pi0MEMConfig(
+            paligemma_variant="dummy",
+            action_expert_variant="dummy",
+            num_video_frames=2,
+            lora=True,
+        ).get_freeze_filter(),
+        save_interval=100,
+        overwrite=True,
+        exp_name="pi0_mem_lora_debug",
         num_train_steps=10,
         wandb_enabled=False,
     ),

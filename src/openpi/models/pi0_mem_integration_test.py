@@ -28,6 +28,13 @@ def test_config_registered():
     assert config.model.model_type == _model.ModelType.PI0_MEM
 
 
+def test_pi0_mem_lora_debug_registered():
+    from openpi.training import config as _config
+
+    cfg = _config.get_config("pi0_mem_lora_debug")
+    assert cfg.model.lora is True
+
+
 def test_end_to_end_training_step():
     """Full forward pass with fake data: LL loss, HL loss, and action sampling."""
     key = jax.random.key(0)

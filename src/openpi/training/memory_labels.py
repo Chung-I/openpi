@@ -148,7 +148,7 @@ class MemoryLabelGenerator:
         )
         return resp.choices[0].message.content
 
-    async def generate_labels_async(self, episodes, out_dir=None):
+    async def generate_labels_async(self, episodes: list[Episode], out_dir=None) -> list[MemoryLabels]:
         """Concurrency-bounded, resumable async generation. With out_dir, writes one
         <episode_id>.json shard per episode and skips episodes already written."""
         out_dir = pathlib.Path(out_dir) if out_dir is not None else None
@@ -168,15 +168,18 @@ class MemoryLabelGenerator:
                 seq = _format_subtask_sequence(ep.subtasks, ep.success_flags, i)
                 pending.append((eid, i, ep.goal, seq))
 
-        aclient = self._get_async_client()
-        sem = asyncio.Semaphore(self.config.max_concurrency)
+        if pending:
+            aclient = self._get_async_client()
+            sem = asyncio.Semaphore(self.config.max_concurrency)
 
-        async def _run(eid, i, goal, seq):
-            async with sem:
-                mem = await self._generate_single_async(aclient, goal, seq)
-            return eid, i, mem
+            async def _run(eid, i, goal, seq):
+                async with sem:
+                    mem = await self._generate_single_async(aclient, goal, seq)
+                return eid, i, mem
 
-        done = await asyncio.gather(*[_run(*p) for p in pending])
+            done = await asyncio.gather(*[_run(*p) for p in pending])
+        else:
+            done = []
         by_ep: dict[str, dict[int, str]] = {}
         for eid, i, mem in done:
             by_ep.setdefault(eid, {})[i] = mem

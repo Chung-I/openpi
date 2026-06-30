@@ -1,3 +1,7 @@
+import asyncio
+import json
+import pathlib
+
 from openpi.training.memory_labels import Episode, MemoryLabelConfig, MemoryLabelGenerator, MemoryLabels
 
 
@@ -70,11 +74,6 @@ def test_config_has_concurrency_default():
     assert MemoryLabelConfig().max_concurrency == 64
 
 
-import asyncio
-import json
-import pathlib
-
-
 def test_generate_labels_async_matches_mock():
     config = MemoryLabelConfig(backend="mock", max_concurrency=4)
     gen = MemoryLabelGenerator(config)
@@ -126,3 +125,14 @@ def test_generate_labels_async_resumes(tmp_path):
     assert labels[0].memories == ["SENTINEL"]            # resumed, not overwritten
     assert (tmp_path / "1.json").exists()                # episode 1 generated
     assert labels[1].memories[0].startswith("Memory summary")
+
+
+def test_generate_labels_async_full_resume_no_client(tmp_path):
+    # All episodes already checkpointed -> must NOT construct a client (which would
+    # raise for the 'local' backend), just return the resumed labels.
+    config = MemoryLabelConfig(backend="local")  # _get_async_client would raise NotImplementedError
+    gen = MemoryLabelGenerator(config)
+    eps = [Episode(goal="g0", subtasks=["a"], success_flags=[True])]
+    (tmp_path / "0.json").write_text(json.dumps({"episode_id": "0", "memories": ["DONE"]}))
+    labels = asyncio.run(gen.generate_labels_async(eps, out_dir=tmp_path))
+    assert labels[0].memories == ["DONE"]

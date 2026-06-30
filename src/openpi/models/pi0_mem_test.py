@@ -1,3 +1,5 @@
+import dataclasses
+
 import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
@@ -76,3 +78,31 @@ def test_pi0_mem_combined_loss():
     loss = nnx_utils.module_jit(model.compute_loss)(key, obs, act, hl_targets=hl_targets)
     assert loss.shape == (batch_size, config.action_horizon)
     assert jnp.all(jnp.isfinite(loss))
+
+
+def _mem_model_and_obs(batch_size: int = 2):
+    key = jax.random.key(0)
+    config = Pi0MEMConfig(paligemma_variant="dummy", action_expert_variant="dummy")
+    model = config.create(key)
+    obs = config.fake_obs(batch_size)
+    return config, model, obs
+
+
+def test_pi0_mem_ll_prefix_excludes_memory():
+    # The LL prefix length must NOT depend on the language memory: the low-level
+    # policy conditions on video + subtask + goal only (MEM paper, Fig. 1).
+    _, model, obs = _mem_model_and_obs()
+    assert obs.tokenized_memory is not None  # precondition: fake_obs provides memory
+    obs_no_mem = dataclasses.replace(obs, tokenized_memory=None, tokenized_memory_mask=None)
+    len_with = model.embed_prefix_ll(obs)[0].shape[1]
+    len_without = model.embed_prefix_ll(obs_no_mem)[0].shape[1]
+    assert len_with == len_without
+
+
+def test_pi0_mem_hl_prefix_includes_memory():
+    # Regression guard: the HL prefix MUST still use the language memory.
+    _, model, obs = _mem_model_and_obs()
+    obs_no_mem = dataclasses.replace(obs, tokenized_memory=None, tokenized_memory_mask=None)
+    len_with = model.embed_prefix_hl(obs)[0].shape[1]
+    len_without = model.embed_prefix_hl(obs_no_mem)[0].shape[1]
+    assert len_with > len_without

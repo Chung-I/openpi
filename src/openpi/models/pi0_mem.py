@@ -113,7 +113,7 @@ class Pi0MEM(_model.BaseModel):
     def embed_prefix_ll(
         self, obs: _model.Observation
     ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Bool[at.Array, " s"]]:
-        """Embed prefix for LL policy: video tokens + subtask + memory + goal.
+        """Embed prefix for LL policy: video tokens + subtask + goal.
 
         All prefix tokens use bidirectional attention (ar_mask=False).
         """
@@ -152,13 +152,6 @@ class Pi0MEM(_model.BaseModel):
             tokens.append(subtask_emb)
             input_mask.append(obs.tokenized_subtask_mask)
             ar_mask += [False] * subtask_emb.shape[1]
-
-        # --- Memory tokens (episodic memory from prior HL steps) ---
-        if obs.tokenized_memory is not None:
-            memory_emb = self.PaliGemma.llm(obs.tokenized_memory, method="embed")
-            tokens.append(memory_emb)
-            input_mask.append(obs.tokenized_memory_mask)
-            ar_mask += [False] * memory_emb.shape[1]
 
         # --- Goal / free-text prompt tokens ---
         if obs.tokenized_prompt is not None:

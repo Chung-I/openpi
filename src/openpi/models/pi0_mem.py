@@ -575,3 +575,76 @@ class Pi0MEM(_model.BaseModel):
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
         return x_0
+
+    def sample_actions_rtc(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        *,
+        prev_action_chunk: at.Float[at.Array, "b ah ad"],
+        inference_delay: int,
+        prefix_attention_horizon: int,
+        prefix_attention_schedule: str = "exp",
+        max_guidance_weight: float = 5.0,
+        num_steps: int = 10,
+        noise: at.Float[at.Array, "b ah ad"] | None = None,
+    ) -> _model.Actions:
+        """Inference-time RTC: guided flow sampling toward prev_action_chunk.
+
+        Ported from real-time-chunking-kinetix realtime_action (soft-guidance branch),
+        run in the kinetix tau-frame (tau = 1 - pi0_mem_time, v_tau = -v_t).
+        """
+        observation = _model.preprocess_observation(None, observation, train=False)
+        batch_size = observation.state.shape[0]
+        if noise is None:
+            noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
+
+        # Encode the LL prefix once -> KV cache (same as sample_actions).
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix_ll(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+
+        def pi0_velocity(x, t_scalar):
+            # pi0_mem velocity v_t at pi0_mem-time t (== body of sample_actions's step).
+            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix_ll(
+                observation, x, jnp.broadcast_to(t_scalar, (batch_size,))
+            )
+            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+            prefix_attn_mask_for_suffix = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
+            full_attn_mask = jnp.concatenate([prefix_attn_mask_for_suffix, suffix_attn_mask], axis=-1)
+            pos = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+            (_, suffix_out), _ = self.PaliGemma.llm(
+                [None, suffix_tokens], mask=full_attn_mask, positions=pos,
+                kv_cache=kv_cache, adarms_cond=[None, adarms_cond],
+            )
+            return self.action_out_proj(suffix_out[:, -self.action_horizon :])
+
+        weights = get_prefix_weights(
+            inference_delay, prefix_attention_horizon, self.action_horizon, prefix_attention_schedule
+        )
+        dtau = 1.0 / num_steps
+
+        def step(carry):
+            x, tau = carry
+
+            def denoiser(x_in):
+                v_tau = -pi0_velocity(x_in, 1.0 - tau)          # kinetix-frame velocity
+                x_clean = x_in + v_tau * (1.0 - tau)            # one-step denoise (clean pred)
+                return x_clean, v_tau
+
+            x_clean, vjp_fun, v_tau = jax.vjp(denoiser, x, has_aux=True)
+            error = (prev_action_chunk - x_clean) * weights[:, None]
+            pinv_correction = vjp_fun(error)[0]
+            inv_r2 = (tau**2 + (1 - tau) ** 2) / ((1 - tau) ** 2)
+            c = jnp.nan_to_num((1 - tau) / tau, posinf=max_guidance_weight)
+            guidance_weight = jnp.minimum(c * inv_r2, max_guidance_weight)
+            v_guided = v_tau + guidance_weight * pinv_correction
+            return (x + dtau * v_guided, tau + dtau)
+
+        def cond(carry):
+            _, tau = carry
+            return tau < 1.0 - dtau / 2
+
+        x_1, _ = jax.lax.while_loop(cond, step, (noise, 0.0))
+        return x_1

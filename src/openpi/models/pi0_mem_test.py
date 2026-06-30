@@ -193,3 +193,52 @@ def test_get_prefix_weights_schedules():
     np.testing.assert_allclose(np.asarray(get_prefix_weights(3, 0, 5, "linear")), [0, 0, 0, 0, 0])
     # zeros: 1 below start, else 0 (and 0 at/after end)
     np.testing.assert_allclose(np.asarray(get_prefix_weights(2, 5, 6, "zeros")), [1, 1, 0, 0, 0, 0])
+
+
+def _rtc_model_and_obs(batch_size=1):
+    key = jax.random.key(0)
+    config = Pi0MEMConfig(paligemma_variant="dummy", action_expert_variant="dummy", num_video_frames=2)
+    model = config.create(key)
+    obs = config.fake_obs(batch_size)
+    return key, config, model, obs
+
+
+def test_sample_actions_rtc_shape():
+    key, config, model, obs = _rtc_model_and_obs()
+    prev = jnp.zeros((1, config.action_horizon, config.action_dim))
+    out = nnx_utils.module_jit(model.sample_actions_rtc)(
+        key, obs, prev_action_chunk=prev, inference_delay=1,
+        prefix_attention_horizon=config.action_horizon, num_steps=4,
+    )
+    assert out.shape == (1, config.action_horizon, config.action_dim)
+
+
+def test_sample_actions_rtc_guidance_off_matches_plain():
+    # With prefix_attention_horizon=0 the weights are all zero -> no guidance ->
+    # the tau-frame integration is numerically identical to plain sample_actions.
+    key, config, model, obs = _rtc_model_and_obs()
+    noise = jax.random.normal(key, (1, config.action_horizon, config.action_dim))
+    prev = jnp.ones((1, config.action_horizon, config.action_dim))  # irrelevant when weights==0
+    plain = nnx_utils.module_jit(model.sample_actions)(key, obs, num_steps=4, noise=noise)
+    rtc = nnx_utils.module_jit(model.sample_actions_rtc)(
+        key, obs, prev_action_chunk=prev, inference_delay=0,
+        prefix_attention_horizon=0, num_steps=4, noise=noise,
+    )
+    assert jnp.allclose(plain, rtc, atol=1e-2)
+
+
+def test_sample_actions_rtc_pins_prefix():
+    # Strong guidance over the whole horizon pulls the output toward prev_action_chunk
+    # more than the unguided sample does.
+    key, config, model, obs = _rtc_model_and_obs()
+    noise = jax.random.normal(key, (1, config.action_horizon, config.action_dim))
+    prev = jnp.ones((1, config.action_horizon, config.action_dim)) * 0.5
+    plain = nnx_utils.module_jit(model.sample_actions)(key, obs, num_steps=8, noise=noise)
+    rtc = nnx_utils.module_jit(model.sample_actions_rtc)(
+        key, obs, prev_action_chunk=prev, inference_delay=0,
+        prefix_attention_horizon=config.action_horizon, prefix_attention_schedule="ones",
+        max_guidance_weight=10.0, num_steps=8, noise=noise,
+    )
+    plain_dist = jnp.mean(jnp.abs(plain - prev))
+    rtc_dist = jnp.mean(jnp.abs(rtc - prev))
+    assert rtc_dist < plain_dist

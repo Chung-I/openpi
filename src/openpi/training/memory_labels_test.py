@@ -1,8 +1,10 @@
 import asyncio
 import json
-import pathlib
 
-from openpi.training.memory_labels import Episode, MemoryLabelConfig, MemoryLabelGenerator, MemoryLabels
+from openpi.training.memory_labels import Episode
+from openpi.training.memory_labels import MemoryLabelConfig
+from openpi.training.memory_labels import MemoryLabelGenerator
+from openpi.training.memory_labels import MemoryLabels
 
 
 def test_mock_backend_generates_labels():
@@ -52,6 +54,7 @@ def test_resolved_api_key_env_defaults():
 
 def test_openai_client_uses_base_url(monkeypatch):
     import pytest
+
     openai = pytest.importorskip("openai")
     captured = {}
 
@@ -91,9 +94,13 @@ def test_generate_labels_async_respects_concurrency(monkeypatch):
     state = {"in_flight": 0, "max": 0}
 
     class _Msg:
-        def __init__(self, c): self.message = type("M", (), {"content": c})
+        def __init__(self, c):
+            self.message = type("M", (), {"content": c})
+
     class _Resp:
-        def __init__(self, c): self.choices = [_Msg(c)]
+        def __init__(self, c):
+            self.choices = [_Msg(c)]
+
     class _Completions:
         async def create(self, **kw):
             state["in_flight"] += 1
@@ -101,8 +108,10 @@ def test_generate_labels_async_respects_concurrency(monkeypatch):
             await asyncio.sleep(0.01)
             state["in_flight"] -= 1
             return _Resp("mem")
+
     class _Chat:
         completions = _Completions()
+
     class _FakeAsync:
         chat = _Chat()
 
@@ -122,8 +131,8 @@ def test_generate_labels_async_resumes(tmp_path):
     # Pre-seed episode 0's shard with a sentinel; it must NOT be regenerated.
     (tmp_path / "0.json").write_text(json.dumps({"episode_id": "0", "memories": ["SENTINEL"]}))
     labels = asyncio.run(gen.generate_labels_async(eps, out_dir=tmp_path))
-    assert labels[0].memories == ["SENTINEL"]            # resumed, not overwritten
-    assert (tmp_path / "1.json").exists()                # episode 1 generated
+    assert labels[0].memories == ["SENTINEL"]  # resumed, not overwritten
+    assert (tmp_path / "1.json").exists()  # episode 1 generated
     assert labels[1].memories[0].startswith("Memory summary")
 
 
@@ -138,6 +147,45 @@ def test_generate_labels_async_full_resume_no_client(tmp_path):
     assert labels[0].memories == ["DONE"]
 
 
+def _fake_openai_client(captured):
+    class _Msg:
+        def __init__(self, c):
+            self.message = type("M", (), {"content": c})
+
+    class _Resp:
+        def __init__(self, c):
+            self.choices = [_Msg(c)]
+
+    class _Completions:
+        def create(self, **kw):
+            captured.update(kw)
+            return _Resp("mem")
+
+    class _Chat:
+        completions = _Completions()
+
+    class _Client:
+        chat = _Chat()
+
+    return _Client()
+
+
+def test_disable_thinking_passes_extra_body():
+    captured = {}
+    gen = MemoryLabelGenerator(MemoryLabelConfig(backend="openai", model="qwen", disable_thinking=True))
+    gen._client = _fake_openai_client(captured)  # noqa: SLF001 -- bypass real client construction
+    gen._generate_single("g", "1. [SUCCESS] x")  # noqa: SLF001
+    assert captured["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def test_thinking_enabled_by_default_sends_no_extra_body():
+    captured = {}
+    gen = MemoryLabelGenerator(MemoryLabelConfig(backend="openai", model="qwen"))
+    gen._client = _fake_openai_client(captured)  # noqa: SLF001
+    gen._generate_single("g", "1. [SUCCESS] x")  # noqa: SLF001
+    assert "extra_body" not in captured
+
+
 def test_generate_labels_async_writes_shard_per_episode(tmp_path):
     config = MemoryLabelConfig(backend="mock", max_concurrency=4)
     gen = MemoryLabelGenerator(config)
@@ -150,4 +198,5 @@ def test_generate_labels_async_writes_shard_per_episode(tmp_path):
     assert (tmp_path / "0.json").exists()
     assert (tmp_path / "1.json").exists()
     import json as _json
+
     assert len(_json.loads((tmp_path / "1.json").read_text())["memories"]) == 1

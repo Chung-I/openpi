@@ -50,6 +50,9 @@ class MemoryLabelConfig:
     api_key_env: str = ""
     base_url: str | None = None
     max_concurrency: int = 64
+    # For "thinking"/reasoning models served via vLLM (e.g. Qwen3): suppress chain-of-thought
+    # so the label is the final compressed memory only. Only affects the openai backend.
+    disable_thinking: bool = False
 
     @property
     def resolved_api_key_env(self) -> str:
@@ -64,7 +67,7 @@ def _format_subtask_sequence(subtasks: list[str], success_flags: list[bool], up_
     lines = []
     for i in range(up_to_index + 1):
         status = "SUCCESS" if success_flags[i] else "FAILED"
-        lines.append(f"{i+1}. [{status}] {subtasks[i]}")
+        lines.append(f"{i + 1}. [{status}] {subtasks[i]}")
     return "\n".join(lines)
 
 
@@ -79,7 +82,7 @@ class MemoryLabelGenerator:
 
         if self.config.backend == "mock":
             return None
-        elif self.config.backend == "claude":
+        if self.config.backend == "claude":
             import os
 
             import anthropic
@@ -119,10 +122,17 @@ class MemoryLabelGenerator:
                 model=self.config.model,
                 max_tokens=self.config.max_memory_tokens,
                 messages=[{"role": "user", "content": prompt}],
+                **self._chat_extra(),
             )
             return response.choices[0].message.content
 
         raise ValueError(f"Unknown backend: {self.config.backend}")
+
+    def _chat_extra(self) -> dict:
+        """Extra kwargs for openai chat.completions.create (e.g. suppress reasoning)."""
+        if self.config.disable_thinking:
+            return {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+        return {}
 
     def _get_async_client(self):
         if self.config.backend == "mock":
@@ -146,6 +156,7 @@ class MemoryLabelGenerator:
             model=self.config.model,
             max_tokens=self.config.max_memory_tokens,
             messages=[{"role": "user", "content": prompt}],
+            **self._chat_extra(),
         )
         return resp.choices[0].message.content
 

@@ -17,7 +17,9 @@ import random
 import statistics
 
 from openpi.training import memory_validation as mv
-from openpi.training.memory_labels import MemoryLabelConfig, MemoryLabelGenerator, _format_subtask_sequence
+from openpi.training.memory_labels import MemoryLabelConfig
+from openpi.training.memory_labels import MemoryLabelGenerator
+from openpi.training.memory_labels import _format_subtask_sequence
 
 
 def main():
@@ -29,6 +31,11 @@ def main():
     p.add_argument("--base_url", default=None)
     p.add_argument("--model", default=None)
     p.add_argument("--sample", type=int, default=50)
+    p.add_argument(
+        "--disable_thinking",
+        action="store_true",
+        help="suppress chain-of-thought for reasoning models (e.g. Qwen3 via vLLM) so judge/probe return parseable answers",
+    )
     args = p.parse_args()
 
     episodes = json.loads(pathlib.Path(args.episodes_file).read_text())
@@ -60,7 +67,9 @@ def main():
         "flagged_examples": flagged[:20],
     }
 
-    cfg = MemoryLabelConfig(backend=args.backend, base_url=args.base_url, model=args.model or "qwen")
+    cfg = MemoryLabelConfig(
+        backend=args.backend, base_url=args.base_url, model=args.model or "qwen", disable_thinking=args.disable_thinking
+    )
     gen = MemoryLabelGenerator(cfg)
     client = gen._get_client()  # noqa: SLF001 -- reuse the same backend for judge/probe
     # Sampled judge + reconstruction probe (skipped for mock).
@@ -72,24 +81,34 @@ def main():
             history = _format_subtask_sequence(ep["subtasks"], ep["success_flags"], i)
             memory = lab["memories"][i]
             jp = mv.build_judge_prompt(ep["goal"], history, memory)
-            jr = client.chat.completions.create(model=cfg.model, max_tokens=64,
-                                                messages=[{"role": "user", "content": jp}])
+            jr = client.chat.completions.create(
+                model=cfg.model,
+                max_tokens=64,
+                messages=[{"role": "user", "content": jp}],
+                **gen._chat_extra(),  # noqa: SLF001
+            )
             raw = jr.choices[0].message.content
             judge_scores.append(raw)
             # Attempt to parse structured judge response for numeric score distribution.
             try:
                 parsed = json.loads(raw)
-                judge_parsed.append({
-                    "faithfulness": parsed.get("faithfulness"),
-                    "decision_relevance": parsed.get("decision_relevance"),
-                    "conciseness": parsed.get("conciseness"),
-                })
+                judge_parsed.append(
+                    {
+                        "faithfulness": parsed.get("faithfulness"),
+                        "decision_relevance": parsed.get("decision_relevance"),
+                        "conciseness": parsed.get("conciseness"),
+                    }
+                )
             except (json.JSONDecodeError, AttributeError):
                 pass
             if i + 1 < len(ep["subtasks"]):
                 rp = mv.build_reconstruction_prompt(ep["goal"], memory)
-                rr = client.chat.completions.create(model=cfg.model, max_tokens=32,
-                                                    messages=[{"role": "user", "content": rp}])
+                rr = client.chat.completions.create(
+                    model=cfg.model,
+                    max_tokens=32,
+                    messages=[{"role": "user", "content": rp}],
+                    **gen._chat_extra(),  # noqa: SLF001
+                )
                 pred = rr.choices[0].message.content.strip().lower()
                 probe["n"] += 1
                 # Guard: empty pred is a substring of everything; do not count as a match.

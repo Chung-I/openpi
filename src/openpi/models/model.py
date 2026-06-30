@@ -124,6 +124,11 @@ class Observation(Generic[ArrayT]):
     # Proprioceptive state history: [*b, K, s].
     video_states: at.Float[ArrayT, "*b k s"] | None = None
 
+    # FAST discrete action tokens (for the knowledge-insulation FAST head).
+    tokenized_action: at.Int[ArrayT, "*b fa"] | None = None
+    tokenized_action_mask: at.Bool[ArrayT, "*b fa"] | None = None
+    tokenized_action_loss_mask: at.Bool[ArrayT, "*b fa"] | None = None
+
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
         """This method defines the mapping between unstructured data (i.e., nested dict) to the structured Observation format."""
@@ -151,6 +156,9 @@ class Observation(Generic[ArrayT]):
             video_images=data.get("video_image"),
             video_image_masks=data.get("video_image_mask"),
             video_states=data.get("video_states"),
+            tokenized_action=data.get("tokenized_action"),
+            tokenized_action_mask=data.get("tokenized_action_mask"),
+            tokenized_action_loss_mask=data.get("tokenized_action_loss_mask"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -243,6 +251,9 @@ def preprocess_observation(
         video_images=observation.video_images,
         video_image_masks=observation.video_image_masks,
         video_states=observation.video_states,
+        tokenized_action=observation.tokenized_action,
+        tokenized_action_mask=observation.tokenized_action_mask,
+        tokenized_action_loss_mask=observation.tokenized_action_loss_mask,
     )
 
 

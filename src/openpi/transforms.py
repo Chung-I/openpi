@@ -188,6 +188,10 @@ class ResizeImages(DataTransformFn):
 
     def __call__(self, data: DataDict) -> DataDict:
         data["image"] = {k: image_tools.resize_with_pad(v, self.height, self.width) for k, v in data["image"].items()}
+        if "video_image" in data:
+            data["video_image"] = {
+                k: image_tools.resize_with_pad(v, self.height, self.width) for k, v in data["video_image"].items()
+            }
         return data
 
 
@@ -289,6 +293,22 @@ class TokenizeFASTInputs(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class TokenizeFASTActions(DataTransformFn):
+    tokenizer: _tokenizer.FASTTokenizer
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "actions" not in data:
+            return data
+        tokens, mask, loss_mask = self.tokenizer.tokenize_actions(np.asarray(data["actions"]))
+        return {
+            **data,
+            "tokenized_action": tokens,
+            "tokenized_action_mask": mask,
+            "tokenized_action_loss_mask": loss_mask,
+        }
+
+
+@dataclasses.dataclass(frozen=True)
 class ExtractFASTActions(DataTransformFn):
     tokenizer: _tokenizer.FASTTokenizer
     action_horizon: int
@@ -332,6 +352,8 @@ class PadStatesAndActions(DataTransformFn):
 
     def __call__(self, data: DataDict) -> DataDict:
         data["state"] = pad_to_dim(data["state"], self.model_action_dim, axis=-1)
+        if "video_states" in data:
+            data["video_states"] = pad_to_dim(data["video_states"], self.model_action_dim, axis=-1)
         if "actions" in data:
             data["actions"] = pad_to_dim(data["actions"], self.model_action_dim, axis=-1)
         return data

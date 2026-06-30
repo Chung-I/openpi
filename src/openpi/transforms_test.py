@@ -119,3 +119,20 @@ def test_extract_prompt_from_task():
 
     with pytest.raises(ValueError, match="task_index=2 not found in task mapping"):
         transform({"task_index": 2})
+
+
+def test_resize_images_handles_video():
+    data = {
+        "image": {"base_0_rgb": np.zeros((180, 320, 3), np.uint8)},
+        "video_image": {"base_0_rgb": np.zeros((6, 180, 320, 3), np.uint8)},
+    }
+    out = _transforms.ResizeImages(224, 224)(data)
+    assert out["image"]["base_0_rgb"].shape == (224, 224, 3)
+    assert out["video_image"]["base_0_rgb"].shape == (6, 224, 224, 3)
+
+
+def test_pad_states_and_actions_handles_video_states():
+    data = {"state": np.zeros(8, np.float32), "video_states": np.zeros((6, 8), np.float32)}
+    out = _transforms.PadStatesAndActions(model_action_dim=32)(data)
+    assert out["state"].shape == (32,)
+    assert out["video_states"].shape == (6, 32)

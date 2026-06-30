@@ -116,6 +116,31 @@ class FASTTokenizer:
 
         return np.asarray(tokens), np.asarray(token_mask), np.asarray(ar_mask), np.asarray(loss_mask)
 
+    def tokenize_actions(self, actions: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Tokenize an action chunk into the FAST postfix used by the MEM FAST head.
+
+        Returns (tokens, mask, loss_mask), each of length self._max_len. The
+        postfix is causal and is the only region with loss. There is no prompt/
+        state prefix here — the MEM model supplies its own (video/subtask/goal)
+        prefix; this produces only the discrete action postfix.
+        """
+        action_tokens = self._fast_tokenizer(actions[None])[0]
+        action_tokens_in_pg = self._act_tokens_to_paligemma_tokens(action_tokens)
+        postfix = (
+            self._paligemma_tokenizer.encode("Action: ")
+            + action_tokens_in_pg.tolist()
+            + self._paligemma_tokenizer.encode("|", add_eos=True)
+        )
+        tokens = postfix[: self._max_len]
+        mask = [True] * len(tokens)
+        loss_mask = [True] * len(tokens)
+        pad = self._max_len - len(tokens)
+        if pad > 0:
+            tokens = tokens + [0] * pad
+            mask = mask + [False] * pad
+            loss_mask = loss_mask + [False] * pad
+        return np.asarray(tokens, dtype=np.int32), np.asarray(mask, dtype=bool), np.asarray(loss_mask, dtype=bool)
+
     def extract_actions(self, tokens: np.ndarray, action_horizon: int, action_dim: int) -> np.ndarray:
         # Decode predicted output tokens
         decoded_tokens = self._paligemma_tokenizer.decode(tokens.tolist())

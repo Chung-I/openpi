@@ -34,6 +34,21 @@ class RLDSDataset:
     filter_dict_path: str | None = None
 
 
+def _video_window_indices(traj_len, num_frames: int, stride: int):
+    """Backward strided window indices, shape [traj_len, num_frames].
+
+    For each timestep t: [t-(num_frames-1)*stride, ..., t-stride, t], clamped to
+    >= 0 (repeat-oldest at episode start). The current frame (offset 0) is the
+    LAST column, matching the video encoder's e(0)=0-at-current temporal posemb.
+    """
+    import tensorflow as tf
+
+    offsets = (tf.range(num_frames) - (num_frames - 1)) * stride  # [K], last == 0
+    base = tf.range(traj_len)[:, None]  # [T, 1]
+    idx = base + offsets[None, :]  # [T, K]
+    return tf.maximum(idx, 0)
+
+
 class DroidRldsDataset:
     def __init__(
         self,
@@ -50,6 +65,8 @@ class DroidRldsDataset:
         shuffle_buffer_size: int = 250_000,
         num_parallel_reads: int = -1,  # -1 == tf.data.AUTOTUNE -- hack to not import tf at top level
         num_parallel_calls: int = -1,  # -1 == tf.data.AUTOTUNE -- hack to not import tf at top level
+        num_video_frames: int = 1,
+        video_stride_frames: int = 15,
     ):
         # Import tensorflow here to not make it mandatory in case RLDS data loader is not used.
         import dlimp as dl
@@ -58,6 +75,9 @@ class DroidRldsDataset:
 
         # Configure Tensorflow with *no GPU devices* (to prevent clobber with PyTorch / JAX)
         tf.config.set_visible_devices([], "GPU")
+
+        self.num_video_frames = num_video_frames
+        self.video_stride_frames = video_stride_frames
 
         # Ensure dataset weights sum to 1.0
         assert sum(dataset.weight for dataset in datasets) == 1.0, "Dataset weights must sum to 1.0"
@@ -197,6 +217,19 @@ class DroidRldsDataset:
 
             dataset = dataset.traj_map(chunk_actions, num_parallel_calls)
 
+            if num_video_frames > 1:
+                def gather_history(traj):
+                    traj_len = tf.shape(traj["observation"]["image"])[0]
+                    idx = _video_window_indices(traj_len, num_video_frames, video_stride_frames)  # [T,K]
+                    obs = traj["observation"]
+                    obs["video_image"] = tf.gather(obs["image"], idx)  # [T,K] encoded bytes
+                    obs["video_wrist_image"] = tf.gather(obs["wrist_image"], idx)
+                    obs["video_joint_position"] = tf.gather(obs["joint_position"], idx)  # [T,K,7]
+                    obs["video_gripper_position"] = tf.gather(obs["gripper_position"], idx)  # [T,K,1]
+                    return traj
+
+                dataset = dataset.traj_map(gather_history, num_parallel_calls)
+
             # Flatten: map from trajectory dataset to dataset of individual action chunks
             dataset = dataset.flatten(num_parallel_calls=num_parallel_calls)
 
@@ -221,6 +254,15 @@ class DroidRldsDataset:
                 traj["observation"]["wrist_image"] = tf.io.decode_image(
                     traj["observation"]["wrist_image"], expand_animations=False, dtype=tf.uint8
                 )
+                if num_video_frames > 1:
+                    def _decode_k(frames):  # frames: [K] encoded -> [K,h,w,3]
+                        return tf.map_fn(
+                            lambda x: tf.io.decode_image(x, expand_animations=False, dtype=tf.uint8),
+                            frames,
+                            fn_output_signature=tf.TensorSpec(shape=[None, None, 3], dtype=tf.uint8),
+                        )
+                    traj["observation"]["video_image"] = _decode_k(traj["observation"]["video_image"])
+                    traj["observation"]["video_wrist_image"] = _decode_k(traj["observation"]["video_wrist_image"])
                 return traj
 
             return dataset.frame_map(decode_images, num_parallel_calls)

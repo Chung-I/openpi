@@ -97,6 +97,8 @@ class DataConfig:
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
     # List of datasets to sample from: name, version, weight, and optionally filter_dict_path
     datasets: Sequence[droid_rlds_dataset.RLDSDataset] = ()
+    # Stride (in dataset frames) between sampled video-memory frames (MEM only).
+    video_stride_frames: int = 15
 
 
 class GroupFactory(Protocol):
@@ -173,6 +175,9 @@ class ModelTransformFactory(GroupFactory):
                             discrete_state_input=model_config.discrete_state_input,
                         ),
                         _transforms.PadStatesAndActions(model_config.action_dim),
+                        _transforms.TokenizeFASTActions(
+                            _tokenizer.FASTTokenizer(model_config.max_action_tokens),
+                        ),
                     ],
                 )
 
@@ -377,6 +382,8 @@ class RLDSDroidDataConfig(DataConfigFactory):
 
     rlds_data_dir: str | None = None
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
+    # Stride (in dataset frames) between sampled video-memory frames (MEM only).
+    video_stride_frames: int = 15
 
     # Filtering options. Can pass a path to a dictionary that maps episodes to timestep ranges
     # to tuples denoting ranges of time steps to keep (start, end). Episodes are uniquely identified with
@@ -394,20 +401,22 @@ class RLDSDroidDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        repack_transform = _transforms.Group(
-            inputs=[
-                _transforms.RepackTransform(
-                    {
-                        "observation/exterior_image_1_left": "observation/image",
-                        "observation/wrist_image_left": "observation/wrist_image",
-                        "observation/joint_position": "observation/joint_position",
-                        "observation/gripper_position": "observation/gripper_position",
-                        "actions": "actions",
-                        "prompt": "prompt",
-                    }
-                )
-            ]
-        )
+        repack_map = {
+            "observation/exterior_image_1_left": "observation/image",
+            "observation/wrist_image_left": "observation/wrist_image",
+            "observation/joint_position": "observation/joint_position",
+            "observation/gripper_position": "observation/gripper_position",
+            "actions": "actions",
+            "prompt": "prompt",
+        }
+        if model_config.model_type == _model.ModelType.PI0_MEM and getattr(model_config, "num_video_frames", 1) > 1:
+            repack_map.update({
+                "observation/video_exterior_image_1_left": "observation/video_image",
+                "observation/video_wrist_image_left": "observation/video_wrist_image",
+                "observation/video_joint_position": "observation/video_joint_position",
+                "observation/video_gripper_position": "observation/video_gripper_position",
+            })
+        repack_transform = _transforms.Group(inputs=[_transforms.RepackTransform(repack_map)])
 
         data_transforms = _transforms.Group(
             inputs=[droid_policy.DroidInputs(model_type=model_config.model_type)],
@@ -434,6 +443,7 @@ class RLDSDroidDataConfig(DataConfigFactory):
             rlds_data_dir=self.rlds_data_dir,
             action_space=self.action_space,
             datasets=self.datasets,
+            video_stride_frames=self.video_stride_frames,
         )
 
 
@@ -993,6 +1003,28 @@ _CONFIGS = [
         save_interval=100,
         overwrite=True,
         exp_name="pi0_mem_debug",
+        num_train_steps=10,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="pi0_mem_lora_debug",
+        data=FakeDataConfig(),
+        batch_size=2,
+        model=pi0_mem_config.Pi0MEMConfig(
+            paligemma_variant="dummy",
+            action_expert_variant="dummy",
+            num_video_frames=2,
+            lora=True,
+        ),
+        freeze_filter=pi0_mem_config.Pi0MEMConfig(
+            paligemma_variant="dummy",
+            action_expert_variant="dummy",
+            num_video_frames=2,
+            lora=True,
+        ).get_freeze_filter(),
+        save_interval=100,
+        overwrite=True,
+        exp_name="pi0_mem_lora_debug",
         num_train_steps=10,
         wandb_enabled=False,
     ),

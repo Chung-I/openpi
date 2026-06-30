@@ -157,6 +157,7 @@ def create_rlds_dataset(
     batch_size: int,
     *,
     shuffle: bool = False,
+    num_video_frames: int = 1,
 ) -> Dataset:
     # At the moment, we only support DROID for RLDS datasets.
     return DroidRldsDataset(
@@ -166,6 +167,8 @@ def create_rlds_dataset(
         action_chunk_size=action_horizon,
         action_space=data_config.action_space,
         datasets=data_config.datasets,
+        num_video_frames=num_video_frames,
+        video_stride_frames=data_config.video_stride_frames,
     )
 
 
@@ -252,6 +255,7 @@ def create_data_loader(
             num_batches=num_batches,
             skip_norm_stats=skip_norm_stats,
             framework=framework,
+            num_video_frames=getattr(config.model, "num_video_frames", 1),
         )
     return create_torch_data_loader(
         data_config,
@@ -347,6 +351,7 @@ def create_rlds_data_loader(
     shuffle: bool = False,
     num_batches: int | None = None,
     framework: str = "jax",
+    num_video_frames: int = 1,
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     """Create an RLDS data loader for training.
 
@@ -363,10 +368,11 @@ def create_rlds_data_loader(
         num_batches: Determines the number of batches to return. If the number exceeds the
             number of batches in the dataset, the data loader will loop over the dataset.
             If not provided, will iterate over the dataset indefinitely.
+        num_video_frames: Number of video frames to gather per step (MEM models only).
     """
     if framework == "pytorch":
         raise NotImplementedError("PyTorch RLDS data loader is not supported yet")
-    dataset = create_rlds_dataset(data_config, action_horizon, batch_size, shuffle=shuffle)
+    dataset = create_rlds_dataset(data_config, action_horizon, batch_size, shuffle=shuffle, num_video_frames=num_video_frames)
     dataset = transform_iterable_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats, is_batched=True)
 
     data_loader = RLDSDataLoader(

@@ -53,6 +53,11 @@ class MEMPolicy:
         hl_interval_steps: int = 30,
         max_new_tokens: int = 64,
         num_flow_steps: int = 10,
+        use_rtc: bool = False,
+        inference_delay: int = 1,
+        prefix_attention_horizon: int | None = None,
+        prefix_attention_schedule: str = "exp",
+        max_guidance_weight: float = 5.0,
     ):
         """
         Args:
@@ -61,12 +66,29 @@ class MEMPolicy:
             hl_interval_steps: How often to run the HL policy (steps between HL calls).
             max_new_tokens: Maximum tokens the HL policy generates per call.
             num_flow_steps: Number of flow-matching steps for LL action sampling.
+            use_rtc: If True, use RTC (receding-time control) guided sampling after the
+                first action chunk is available. Default False → identical to prior behavior.
+            inference_delay: Number of steps of delay between observation and action chunk
+                (passed to sample_actions_rtc).
+            prefix_attention_horizon: Number of frames to attend to from the previous chunk.
+                Defaults to model.action_horizon when None.
+            prefix_attention_schedule: Schedule for prefix attention weights ("exp", "linear",
+                etc.) passed to sample_actions_rtc.
+            max_guidance_weight: Maximum classifier-free guidance weight for RTC sampling.
         """
         self.model = model
         self.config = config
         self.hl_interval_steps = hl_interval_steps
         self.max_new_tokens = max_new_tokens
         self.num_flow_steps = num_flow_steps
+        self.use_rtc = use_rtc
+        self.inference_delay = inference_delay
+        self.prefix_attention_horizon = (
+            prefix_attention_horizon if prefix_attention_horizon is not None else model.action_horizon
+        )
+        self.prefix_attention_schedule = prefix_attention_schedule
+        self.max_guidance_weight = max_guidance_weight
+        self.prev_action_chunk = None
 
         # Episode state — cleared by reset().
         self.memory: str = ""
@@ -92,6 +114,7 @@ class MEMPolicy:
         self.memory = ""
         self.subtask = ""
         self.step_count = 0
+        self.prev_action_chunk = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -226,8 +249,21 @@ class MEMPolicy:
         else:
             ll_rng = rng
 
-        actions = self.model.sample_actions(
-            ll_rng, obs_with_ctx, num_steps=self.num_flow_steps
-        )
+        if self.use_rtc and self.prev_action_chunk is not None:
+            actions = self.model.sample_actions_rtc(
+                ll_rng,
+                obs_with_ctx,
+                prev_action_chunk=self.prev_action_chunk,
+                inference_delay=self.inference_delay,
+                prefix_attention_horizon=self.prefix_attention_horizon,
+                prefix_attention_schedule=self.prefix_attention_schedule,
+                max_guidance_weight=self.max_guidance_weight,
+                num_steps=self.num_flow_steps,
+            )
+        else:
+            actions = self.model.sample_actions(
+                ll_rng, obs_with_ctx, num_steps=self.num_flow_steps
+            )
+        self.prev_action_chunk = actions
         self.step_count += 1
         return actions

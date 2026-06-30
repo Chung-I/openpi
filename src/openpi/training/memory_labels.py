@@ -1,5 +1,8 @@
+import asyncio
 import dataclasses
+import json
 import logging
+import pathlib
 from typing import Literal
 
 logger = logging.getLogger("openpi")
@@ -119,6 +122,75 @@ class MemoryLabelGenerator:
             return response.choices[0].message.content
 
         raise ValueError(f"Unknown backend: {self.config.backend}")
+
+    def _get_async_client(self):
+        if self.config.backend == "mock":
+            return None
+        if self.config.backend == "openai":
+            import os
+
+            import openai
+
+            return openai.AsyncOpenAI(
+                base_url=self.config.base_url,
+                api_key=os.environ.get(self.config.resolved_api_key_env) or "EMPTY",
+            )
+        raise NotImplementedError(f"async generation not supported for backend {self.config.backend}")
+
+    async def _generate_single_async(self, aclient, goal: str, subtask_sequence: str) -> str:
+        if self.config.backend == "mock":
+            return f"Memory summary for: {goal}"
+        prompt = MEMORY_PROMPT_TEMPLATE.format(goal=goal, subtask_sequence=subtask_sequence)
+        resp = await aclient.chat.completions.create(
+            model=self.config.model,
+            max_tokens=self.config.max_memory_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.choices[0].message.content
+
+    async def generate_labels_async(self, episodes, out_dir=None):
+        """Concurrency-bounded, resumable async generation. With out_dir, writes one
+        <episode_id>.json shard per episode and skips episodes already written."""
+        out_dir = pathlib.Path(out_dir) if out_dir is not None else None
+        if out_dir is not None:
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+        results: dict[str, MemoryLabels] = {}
+        pending: list[tuple[str, int, str, str]] = []
+        for idx, ep in enumerate(episodes):
+            eid = str(idx)
+            shard = (out_dir / f"{eid}.json") if out_dir is not None else None
+            if shard is not None and shard.exists():
+                data = json.loads(shard.read_text())
+                results[eid] = MemoryLabels(episode_id=data["episode_id"], memories=data["memories"])
+                continue
+            for i in range(len(ep.subtasks)):
+                seq = _format_subtask_sequence(ep.subtasks, ep.success_flags, i)
+                pending.append((eid, i, ep.goal, seq))
+
+        aclient = self._get_async_client()
+        sem = asyncio.Semaphore(self.config.max_concurrency)
+
+        async def _run(eid, i, goal, seq):
+            async with sem:
+                mem = await self._generate_single_async(aclient, goal, seq)
+            return eid, i, mem
+
+        done = await asyncio.gather(*[_run(*p) for p in pending])
+        by_ep: dict[str, dict[int, str]] = {}
+        for eid, i, mem in done:
+            by_ep.setdefault(eid, {})[i] = mem
+
+        for idx, ep in enumerate(episodes):
+            eid = str(idx)
+            if eid in results:
+                continue
+            mems = [by_ep[eid][i] for i in range(len(ep.subtasks))]
+            results[eid] = MemoryLabels(episode_id=eid, memories=mems)
+            if out_dir is not None:
+                (out_dir / f"{eid}.json").write_text(json.dumps({"episode_id": eid, "memories": mems}))
+
+        return [results[str(idx)] for idx in range(len(episodes))]
 
     def generate_labels(self, episodes: list[Episode]) -> list[MemoryLabels]:
         """Generate memory labels for each timestep in each episode.

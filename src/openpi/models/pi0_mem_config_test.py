@@ -43,11 +43,6 @@ def test_fake_obs_has_fast_action_fields():
     assert obs.tokenized_action_loss_mask.shape == (2, config.max_action_tokens)
 
 
-import flax.nnx as nnx
-
-from openpi.shared import nnx_utils
-
-
 def test_get_freeze_filter_partitions_params():
     config = Pi0MEMConfig(paligemma_variant="gemma_2b", action_expert_variant="gemma_300m", lora=True)
     freeze = config.get_freeze_filter()

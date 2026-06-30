@@ -26,7 +26,8 @@ _FAILURE_KEYWORDS = ("failed", "recovery", "retry", "mistake")
 def goal_from_task_info(obj: dict) -> str:
     name = (obj.get("task_name") or "").strip()
     scene = (obj.get("init_scene_text") or "").strip()
-    return (f"{name}. {scene}".strip().strip(".")).lower() if scene else name.lower()
+    parts = [p for p in (name, scene) if p]
+    return ". ".join(parts).lower()
 
 
 def subtasks_and_flags_from_task_info(obj: dict) -> tuple[list[str], list[bool]]:
@@ -58,11 +59,11 @@ def episodes_from_task_info_list(objs: list[dict], min_subtasks: int = 3) -> lis
     return out
 
 
-def download_task_info(repo: str = REPO) -> list[pathlib.Path]:
+def download_task_info(repo: str = REPO, out_dir: str | None = None) -> list[pathlib.Path]:
     import huggingface_hub
 
     root = huggingface_hub.snapshot_download(
-        repo, repo_type="dataset", allow_patterns="task_info/*.json", max_workers=4
+        repo, repo_type="dataset", allow_patterns="task_info/*.json", local_dir=out_dir, max_workers=4
     )
     return [pathlib.Path(p) for p in sorted(glob.glob(f"{root}/task_info/*.json"))]
 

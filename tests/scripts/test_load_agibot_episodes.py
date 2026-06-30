@@ -42,7 +42,7 @@ def test_failure_keyword_sets_false_flag():
 def test_episode_from_task_info_filters_short():
     assert mod.episode_from_task_info(_obj(["a", "b"]), min_subtasks=3) is None
     ep = mod.episode_from_task_info(_obj(["a", "b", "c"]), min_subtasks=3)
-    assert ep is not None and len(ep.subtasks) == 3 and ep.success_flags == [True, True, True]
+    assert ep is not None and len(ep.subtasks) == 3 and ep.success_flags == [True, True, True]  # noqa: PT018
 
 
 def test_episodes_from_fixture():

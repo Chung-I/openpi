@@ -1,0 +1,92 @@
+[
+  {
+    "episode_id": 648649,
+    "label_info": {
+      "action_config": [
+        {
+          "start_frame": 8,
+          "end_frame": 218,
+          "action_text": "Retrieve cucumber from the shelf.",
+          "skill": "Pick"
+        },
+        {
+          "start_frame": 218,
+          "end_frame": 436,
+          "action_text": "Place the held cucumber into the plastic bag in the shopping cart.",
+          "skill": "Place"
+        },
+        {
+          "start_frame": 436,
+          "end_frame": 654,
+          "action_text": "Retrieve tomato from the shelf.",
+          "skill": "Pick"
+        },
+        {
+          "start_frame": 654,
+          "end_frame": 872,
+          "action_text": "Place the held tomato into the plastic bag in the shopping cart.",
+          "skill": "Place"
+        },
+        {
+          "start_frame": 872,
+          "end_frame": 1090,
+          "action_text": "Retrieve corn from the shelf.",
+          "skill": "Pick"
+        },
+        {
+          "start_frame": 1090,
+          "end_frame": 1294,
+          "action_text": "Place the held corn into the shopping cart's plastic bag.",
+          "skill": "Place"
+        }
+      ]
+    },
+    "task_name": "Pickup items in the supermarket",
+    "init_scene_text": "The robot is positioned in front of the fruit stand in the supermarket environment."
+  },
+  {
+    "episode_id": 649755,
+    "label_info": {
+      "action_config": [
+        {
+          "start_frame": 0,
+          "end_frame": 218,
+          "action_text": "Retrieve pear from the shelf.",
+          "skill": "Pick"
+        },
+        {
+          "start_frame": 218,
+          "end_frame": 340,
+          "action_text": "Place the held pear into the plastic bag in the shopping cart.",
+          "skill": "Place"
+        },
+        {
+          "start_frame": 340,
+          "end_frame": 483,
+          "action_text": "Retrieve orange from the shelf.",
+          "skill": "Pick"
+        },
+        {
+          "start_frame": 483,
+          "end_frame": 644,
+          "action_text": "Place the held orange into the plastic bag in the shopping cart.",
+          "skill": "Place"
+        },
+        {
+          "start_frame": 644,
+          "end_frame": 805,
+          "action_text": "Retrieve carambola from the shelf.",
+          "skill": "Pick"
+        },
+        {
+          "start_frame": 805,
+          "end_frame": 963,
+          "action_text": "Place the held carambola into the shopping cart's plastic bag.",
+          "skill": "Place"
+        }
+      ]
+    },
+    "task_name": "Pickup items in the supermarket",
+    "init_scene_text": "The robot is positioned in front of the fruit stand in the supermarket environment."
+  }
+]

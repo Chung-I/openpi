@@ -259,7 +259,7 @@ class DroidRldsDataset:
                         return tf.map_fn(
                             lambda x: tf.io.decode_image(x, expand_animations=False, dtype=tf.uint8),
                             frames,
-                            fn_output_signature=tf.uint8,
+                            fn_output_signature=tf.TensorSpec(shape=[None, None, 3], dtype=tf.uint8),
                         )
                     traj["observation"]["video_image"] = _decode_k(traj["observation"]["video_image"])
                     traj["observation"]["video_wrist_image"] = _decode_k(traj["observation"]["video_wrist_image"])

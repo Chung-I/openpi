@@ -133,12 +133,14 @@ class MemoryLabelGenerator:
 
     def _complete(self, prompt: str) -> str:
         if self.config.backend == "mock":
+            # mock: content derives from the rendered prompt prefix, not the goal
             return f"Memory summary for: {prompt[:20]}"
         client = self._get_client()
         if self.config.backend == "claude":
             resp = client.messages.create(
                 model=self.config.model,
                 max_tokens=self.config.max_memory_tokens,
+                temperature=self.config.temperature,
                 messages=[{"role": "user", "content": prompt}],
             )
             return resp.content[0].text
@@ -256,8 +258,7 @@ class MemoryLabelGenerator:
                 return eid, ml
 
             episode_results = await asyncio.gather(*[_run_episode(idx, ep) for idx, ep in pending_episodes])
-            for eid, ml in episode_results:
-                results[eid] = ml
+            results.update(episode_results)
 
         return [results[str(idx)] for idx in range(len(episodes))]
 

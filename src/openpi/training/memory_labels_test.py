@@ -70,7 +70,7 @@ def test_openai_client_uses_base_url(monkeypatch):
 
     config = MemoryLabelConfig(backend="openai", base_url="http://localhost:8000/v1", model="qwen")
     gen = MemoryLabelGenerator(config)
-    gen._get_client()
+    gen._get_client()  # noqa: SLF001
     assert captured["base_url"] == "http://localhost:8000/v1"
     assert captured["api_key"] == "EMPTY"  # vLLM ignores key; fall back when env unset
 
@@ -241,6 +241,38 @@ def test_recursive_feeds_previous_memory_into_next_prompt():
 def test_recursive_template_has_required_placeholders():
     for key in ("{goal}", "{previous_memory}", "{new_event}"):
         assert key in RECURSIVE_MEMORY_PROMPT_TEMPLATE
+
+
+class _AsyncRecordingClient:
+    """Async openai-like client: returns "mem{n}" and records each prompt."""
+
+    def __init__(self):
+        self.prompts = []
+        self._n = 0
+        comp = self
+
+        class _Completions:
+            async def create(self, **kw):
+                comp.prompts.append(kw["messages"][0]["content"])
+                comp._n += 1  # noqa: SLF001
+                msg = type("M", (), {"content": f"mem{comp._n}"})  # noqa: SLF001
+                return type("R", (), {"choices": [type("C", (), {"message": msg})]})
+
+        self.chat = type("Chat", (), {"completions": _Completions()})
+
+
+def test_recursive_async_feeds_previous_memory(monkeypatch):
+    gen = MemoryLabelGenerator(
+        MemoryLabelConfig(backend="openai", model="qwen", generation_mode="recursive")
+    )
+    client = _AsyncRecordingClient()
+    monkeypatch.setattr(gen, "_get_async_client", lambda: client)
+    eps = [Episode(goal="g", subtasks=["a", "b", "c"], success_flags=[True, True, True])]
+    labels = asyncio.run(gen.generate_labels_async(eps))
+    assert labels[0].memories == ["mem1", "mem2", "mem3"]
+    assert RECURSIVE_FIRST_MEMORY in client.prompts[0]   # step 0 seeded with sentinel
+    assert "mem1" in client.prompts[1]                   # step 1 sees step 0 output
+    assert "mem2" in client.prompts[2]                   # step 2 sees step 1 output
 
 
 def test_temperature_passed_to_create():

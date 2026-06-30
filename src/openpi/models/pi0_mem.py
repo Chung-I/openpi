@@ -393,6 +393,41 @@ class Pi0MEM(_model.BaseModel):
         # Return generated tokens, stripping the leading BOS token
         return generated[:, 1:]
 
+    @at.typecheck
+    def compute_loss_fast(
+        self,
+        obs: _model.Observation,
+        prefix_tokens: at.Float[at.Array, "b s emb"],
+        prefix_mask: at.Bool[at.Array, "b s"],
+        prefix_ar_mask: at.Bool[at.Array, " s"],
+    ) -> at.Float[at.Array, " b"]:
+        """FAST discrete-action cross-entropy through the VLM backbone.
+
+        The action postfix is causal; loss is next-token CE on the FAST tokens.
+        Trains the backbone (+ LoRA) and, via prefix_tokens, the video encoder.
+        """
+        action_tokens = obs.tokenized_action
+        action_emb = self.PaliGemma.llm(action_tokens, method="embed")
+        suffix_ar_mask = jnp.ones(action_tokens.shape[1], dtype=jnp.bool_)
+        input_mask = jnp.concatenate([prefix_mask, obs.tokenized_action_mask], axis=1)
+        full_ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
+        attn_mask = make_attn_mask(input_mask, full_ar_mask)
+        positions = jnp.cumsum(input_mask, axis=1) - 1
+        (out, _), _ = self.PaliGemma.llm(
+            [jnp.concatenate([prefix_tokens, action_emb], axis=1), None],
+            mask=attn_mask,
+            positions=positions,
+        )
+        prefix_len = prefix_tokens.shape[1]
+        action_out = out[:, prefix_len:, :]
+        logits = self.PaliGemma.llm(action_out, method="decode_logits")
+        shifted_logits = logits[:, :-1, :]
+        shifted_targets = action_tokens[:, 1:]
+        shifted_mask = obs.tokenized_action_loss_mask[:, 1:]
+        log_probs = jax.nn.log_softmax(shifted_logits, axis=-1)
+        token_losses = -jnp.take_along_axis(log_probs, shifted_targets[:, :, None], axis=-1).squeeze(-1)
+        return jnp.sum(token_losses * shifted_mask, axis=-1) / jnp.maximum(jnp.sum(shifted_mask, axis=-1), 1)
+
     @override
     def compute_loss(
         self,
@@ -413,36 +448,44 @@ class Pi0MEM(_model.BaseModel):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        # One forward pass over the concatenated prefix + suffix
+        # Encode the LL prefix once (video encoded here, with gradient for the FAST pass).
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix_ll(observation_ll)
-        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix_ll(
-            observation_ll, x_t, time
-        )
-        input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
-        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
-        attn_mask = make_attn_mask(input_mask, ar_mask)
-        positions = jnp.cumsum(input_mask, axis=1) - 1
-        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
-            [prefix_tokens, suffix_tokens],
-            mask=attn_mask,
+
+        # --- Flow pass (insulated): flow expert attends to a stop-grad'd prefix KV. ---
+        sg_prefix = jax.lax.stop_gradient(prefix_tokens)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        _, kv_cache = self.PaliGemma.llm([sg_prefix, None], mask=prefix_attn_mask, positions=prefix_positions)
+        kv_cache = jax.tree.map(jax.lax.stop_gradient, kv_cache)
+
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix_ll(observation_ll, x_t, time)
+        suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+        prefix_attn_for_suffix = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
+        full_attn_mask = jnp.concatenate([prefix_attn_for_suffix, suffix_attn_mask], axis=-1)
+        positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+        (_, suffix_out), _ = self.PaliGemma.llm(
+            [None, suffix_tokens],
+            mask=full_attn_mask,
             positions=positions,
+            kv_cache=kv_cache,
             adarms_cond=[None, adarms_cond],
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
-        ll_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)  # [*b, ah]
+        ll_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)  # [b, ah]
 
+        total_loss = self.config.ll_loss_weight * ll_loss
+
+        # --- FAST CE pass (trains backbone + video encoder). ---
+        if observation_ll.tokenized_action is not None and self.config.fast_loss_weight > 0:
+            fast_loss = self.compute_loss_fast(observation_ll, prefix_tokens, prefix_mask, prefix_ar_mask)  # [b]
+            total_loss = total_loss + self.config.fast_loss_weight * fast_loss[:, None]
+
+        # --- HL CE (unchanged; uses the raw observation / single-frame prefix). ---
         if hl_targets is not None and self.config.hl_loss_weight > 0:
             hl_targets_mask = jnp.ones_like(hl_targets, dtype=jnp.bool_)
-            hl_loss = self.compute_loss_hl(
-                hl_rng, observation, hl_targets, hl_targets_mask, train=train
-            )  # [b]
-            # hl_loss is [b]; ll_loss is [b, ah] — expand for broadcasting
-            total_loss = (
-                self.config.ll_loss_weight * ll_loss
-                + self.config.hl_loss_weight * hl_loss[:, None]
-            )
-        else:
-            total_loss = ll_loss
+            hl_loss = self.compute_loss_hl(hl_rng, observation, hl_targets, hl_targets_mask, train=train)  # [b]
+            total_loss = total_loss + self.config.hl_loss_weight * hl_loss[:, None]
+
         return total_loss
 
     @override

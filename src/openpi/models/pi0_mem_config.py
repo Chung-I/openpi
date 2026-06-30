@@ -36,6 +36,7 @@ class Pi0MEMConfig(_model.BaseModelConfig):
     max_action_tokens: int = 256
     hl_loss_weight: float = 1.0
     ll_loss_weight: float = 1.0
+    fast_loss_weight: float = 1.0
 
     def __post_init__(self):
         if self.max_token_len is None:

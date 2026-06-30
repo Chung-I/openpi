@@ -38,6 +38,28 @@ _PALIGEMMA_BOS_TOKEN_ID: int = 2
 _PALIGEMMA_EOS_TOKEN_ID: int = 1
 
 
+def get_prefix_weights(start: int, end: int, total: int, schedule: str) -> jax.Array:
+    """Prefix-attention weights for RTC guidance (ported from real-time-chunking-kinetix).
+
+    With start=2, end=6, total=10 (schedule="linear"): [1,1,0.8,0.6,0.4,0.2,0,0,0,0].
+    `start` (inclusive) is where the chunk may start changing; `end` (exclusive) is
+    where it stops attending to the prefix. `end` takes precedence: if end < start,
+    start is pushed down to end; if end == 0 the whole prefix is ignored.
+    """
+    start = jnp.minimum(start, end)
+    if schedule == "ones":
+        w = jnp.ones(total)
+    elif schedule == "zeros":
+        w = (jnp.arange(total) < start).astype(jnp.float32)
+    elif schedule in ("linear", "exp"):
+        w = jnp.clip((start - 1 - jnp.arange(total)) / (end - start + 1) + 1, 0, 1)
+        if schedule == "exp":
+            w = w * jnp.expm1(w) / (jnp.e - 1)
+    else:
+        raise ValueError(f"Invalid schedule: {schedule}")
+    return jnp.where(jnp.arange(total) >= end, 0, w)
+
+
 class Pi0MEM(_model.BaseModel):
     def __init__(self, config: pi0_mem_config.Pi0MEMConfig, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)

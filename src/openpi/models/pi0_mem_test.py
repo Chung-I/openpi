@@ -173,3 +173,23 @@ def test_fast_loss_trains_backbone_and_video():
     norms = _grad_abs_by_path(model, lambda m: m.compute_loss(key, obs, act).mean())
     assert any(g > 0 for p, g in norms.items() if _is_backbone(p))
     assert any(g > 0 for p, g in norms.items() if "video_img" in p)
+
+
+def test_get_prefix_weights_linear_matches_reference():
+    from openpi.models.pi0_mem import get_prefix_weights
+    import numpy as np
+
+    w = np.asarray(get_prefix_weights(2, 6, 10, "linear"))
+    np.testing.assert_allclose(w, [1, 1, 0.8, 0.6, 0.4, 0.2, 0, 0, 0, 0], atol=1e-6)
+
+
+def test_get_prefix_weights_schedules():
+    from openpi.models.pi0_mem import get_prefix_weights
+    import numpy as np
+
+    # ones: all 1 except positions >= end
+    np.testing.assert_allclose(np.asarray(get_prefix_weights(0, 4, 6, "ones")), [1, 1, 1, 1, 0, 0])
+    # end == 0 -> entire prefix ignored (all zeros)
+    np.testing.assert_allclose(np.asarray(get_prefix_weights(3, 0, 5, "linear")), [0, 0, 0, 0, 0])
+    # zeros: 1 below start, else 0 (and 0 at/after end)
+    np.testing.assert_allclose(np.asarray(get_prefix_weights(2, 5, 6, "zeros")), [1, 1, 0, 0, 0, 0])

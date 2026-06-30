@@ -44,8 +44,13 @@ class Pi0MEM(_model.BaseModel):
         self.config = config
         self.pi05 = config.pi05
 
-        paligemma_config = _gemma.get_config(config.paligemma_variant)
-        action_expert_config = _gemma.get_config(config.action_expert_variant)
+        pg_variant = config.paligemma_variant
+        ax_variant = config.action_expert_variant
+        if config.lora:
+            pg_variant = pg_variant if "lora" in pg_variant or pg_variant == "dummy" else pg_variant + "_lora"
+            ax_variant = ax_variant if "lora" in ax_variant or ax_variant == "dummy" else ax_variant + "_lora"
+        paligemma_config = _gemma.get_config(pg_variant)
+        action_expert_config = _gemma.get_config(ax_variant)
 
         # LLM backbone (two-expert: PaliGemma + action expert)
         llm = nnx_bridge.ToNNX(

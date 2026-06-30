@@ -41,3 +41,26 @@ def test_fake_obs_has_fast_action_fields():
     assert obs.tokenized_action.shape == (2, config.max_action_tokens)
     assert obs.tokenized_action_mask.shape == (2, config.max_action_tokens)
     assert obs.tokenized_action_loss_mask.shape == (2, config.max_action_tokens)
+
+
+import flax.nnx as nnx
+
+from openpi.shared import nnx_utils
+
+
+def test_get_freeze_filter_partitions_params():
+    config = Pi0MEMConfig(paligemma_variant="gemma_2b", action_expert_variant="gemma_300m", lora=True)
+    freeze = config.get_freeze_filter()
+    # frozen: freeze filter returns True for the path
+    def frozen(path_keys):
+        return freeze(tuple(path_keys), object())
+    # trainable: freeze filter returns False for the path (path-based check; nnx.Param type is a
+    # production concern handled via nnx.All(nnx.Param, nnx.Not(freeze)) in training/config.py)
+    def is_trainable(path_keys):
+        return not freeze(tuple(path_keys), object())
+    # backbone base weight: frozen
+    assert frozen(["PaliGemma", "llm", "layers", "attn", "kernel"]) is True
+    # backbone lora adapter: trainable
+    assert is_trainable(["PaliGemma", "llm", "layers", "attn", "lora_a"]) is True
+    # video encoder: trainable
+    assert is_trainable(["PaliGemma", "video_img", "embedding", "kernel"]) is True

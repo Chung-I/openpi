@@ -1,6 +1,7 @@
 import dataclasses
 from typing import TYPE_CHECKING
 
+import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
 from typing_extensions import override
@@ -8,6 +9,7 @@ from typing_extensions import override
 from openpi.models import model as _model
 from openpi.models.video_vit import VideoViTConfig
 from openpi.shared import array_typing as at
+from openpi.shared import nnx_utils
 
 if TYPE_CHECKING:
     from openpi.models.pi0_mem import Pi0MEM
@@ -37,6 +39,7 @@ class Pi0MEMConfig(_model.BaseModelConfig):
     hl_loss_weight: float = 1.0
     ll_loss_weight: float = 1.0
     fast_loss_weight: float = 1.0
+    lora: bool = False
 
     def __post_init__(self):
         if self.max_token_len is None:
@@ -62,6 +65,38 @@ class Pi0MEMConfig(_model.BaseModelConfig):
         from openpi.models.pi0_mem import Pi0MEM
 
         return Pi0MEM(self, rngs=nnx.Rngs(rng))
+
+    def get_freeze_filter(self) -> nnx.filterlib.Filter:
+        """Returns the freeze filter based on the model config."""
+        pg = self.paligemma_variant + (
+            "_lora"
+            if self.lora and "lora" not in self.paligemma_variant and self.paligemma_variant != "dummy"
+            else ""
+        )
+        ax = self.action_expert_variant + (
+            "_lora"
+            if self.lora and "lora" not in self.action_expert_variant and self.action_expert_variant != "dummy"
+            else ""
+        )
+        filters = []
+        has_lora = False
+        gemma_params_filter = nnx_utils.PathRegex(".*llm.*")
+        action_expert_params_filter = nnx_utils.PathRegex(".*llm.*_1.*")
+        if "lora" in pg:
+            filters.append(gemma_params_filter)
+            if "lora" not in ax:
+                # If only freezing gemma params, exclude action expert params.
+                filters.append(nnx.Not(action_expert_params_filter))
+            has_lora = True
+        elif "lora" in ax:
+            filters.append(action_expert_params_filter)
+            has_lora = True
+        if has_lora:
+            # If any lora is used, exclude all lora params from being frozen.
+            filters.append(nnx.Not(nnx_utils.PathRegex(".*lora.*")))
+        if not filters:
+            return nnx.Nothing
+        return nnx.All(*filters)
 
     @override
     def inputs_spec(self, *, batch_size: int = 1) -> tuple[_model.Observation, _model.Actions]:

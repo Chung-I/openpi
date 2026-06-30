@@ -44,6 +44,8 @@ class MemoryLabelConfig:
     max_memory_tokens: int = 128
     batch_size: int = 32
     api_key_env: str = ""
+    base_url: str | None = None
+    max_concurrency: int = 64
 
     @property
     def resolved_api_key_env(self) -> str:
@@ -84,7 +86,10 @@ class MemoryLabelGenerator:
 
             import openai
 
-            self._client = openai.OpenAI(api_key=os.environ.get(self.config.resolved_api_key_env))
+            self._client = openai.OpenAI(
+                base_url=self.config.base_url,
+                api_key=os.environ.get(self.config.resolved_api_key_env) or "EMPTY",
+            )
         elif self.config.backend == "local":
             raise NotImplementedError("Local LLM backend not yet implemented")
         return self._client

@@ -71,8 +71,10 @@ def load_prompts(prompt_dir) -> dict:
 
 
 def run_bakeoff(episodes: list[Episode], prompt_dir, gen_config_factory, *, out_dir) -> dict:
-    """For each candidate prompt: generate (resumable) + heuristic-score. Judge/determinism
-    metrics default to 1.0 here; the CLI overrides them when a live client is available."""
+    """For each candidate prompt: generate (resumable) + heuristic-score. The
+    decision_relevance / temporal_coherence / determinism metrics are stubbed at 1.0
+    here (via setdefault); live LLM-judge/determinism filling is a deferred
+    post-implementation step (see the plan), so heuristic metrics drive the ranking."""
     out_dir = pathlib.Path(out_dir)
     prompts = load_prompts(prompt_dir)
     metrics: dict[str, dict] = {}

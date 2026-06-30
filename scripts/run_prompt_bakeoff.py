@@ -1,8 +1,12 @@
 """Run the memory-label prompt bake-off on NCHC (Qwen via vLLM).
 
 Calibrates throughput against the live server, trims episodes to a time budget, runs the
-recursive bake-off over all candidate prompts, fills judge/determinism/coherence metrics,
-writes bakeoff_report.{json,md}, then runs the winning prompt once in stateless mode.
+recursive bake-off over all candidate prompts using heuristic metrics (faithfulness,
+conciseness, structural), and writes bakeoff_report.{json,md}.
+
+NOTE (deferred to the post-implementation NCHC run, see the plan): the LLM-judge,
+determinism, and temporal-coherence metrics are currently stubbed at 1.0; live filling of
+those metrics and the recursive-vs-stateless baseline comparison are not yet implemented here.
 
 Usage:
     uv run python scripts/run_prompt_bakeoff.py \

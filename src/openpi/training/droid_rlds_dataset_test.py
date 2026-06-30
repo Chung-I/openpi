@@ -1,5 +1,7 @@
 import numpy as np
-import tensorflow as tf
+import pytest
+
+tf = pytest.importorskip("tensorflow")
 
 from openpi.training.droid_rlds_dataset import _video_window_indices
 

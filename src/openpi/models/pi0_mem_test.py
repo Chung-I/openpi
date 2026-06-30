@@ -3,10 +3,31 @@ import dataclasses
 import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from openpi.models import model as _model
 from openpi.models.pi0_mem_config import Pi0MEMConfig
 from openpi.shared import nnx_utils
+
+
+def test_from_dict_normalizes_uint8_video_images():
+    """Real DROID video frames arrive uint8; from_dict must normalize them to [-1, 1]
+    float32 like single-frame images (FakeData's float32 video spec hid this gap)."""
+    b, k, h, w = 2, 3, 4, 4
+    data = {
+        "image": {"base_0_rgb": np.zeros((b, h, w, 3), np.uint8)},
+        "image_mask": {"base_0_rgb": np.ones((b,), bool)},
+        "state": np.zeros((b, 8), np.float32),
+        "video_image": {"base_0_rgb": np.full((b, k, h, w, 3), 255, np.uint8)},
+        "video_image_mask": {"base_0_rgb": np.ones((b, k), bool)},
+        "video_states": np.zeros((b, k, 8), np.float32),
+    }
+    obs = _model.Observation.from_dict(data)
+    video = np.asarray(obs.video_images["base_0_rgb"])
+    assert video.dtype == np.float32
+    assert np.allclose(video, 1.0)  # 255 -> +1.0
+    # single-frame images still normalized (regression guard)
+    assert np.asarray(obs.images["base_0_rgb"]).dtype == np.float32
 
 
 def test_pi0_mem_ll_loss():
@@ -133,9 +154,7 @@ def _grad_abs_by_path(model, scalar_loss_fn):
     grads = jax.grad(lambda p: scalar_loss_fn(nnx.merge(graphdef, p)))(params)
     out = {}
     for path, leaf in jax.tree_util.tree_leaves_with_path(grads):
-        key = "/".join(
-            str(getattr(p, "key", getattr(p, "idx", p))) for p in path
-        )
+        key = "/".join(str(getattr(p, "key", getattr(p, "idx", p))) for p in path)
         out[key] = float(jnp.sum(jnp.abs(leaf)))
     return out
 
@@ -149,8 +168,10 @@ def test_flow_loss_does_not_touch_backbone_or_video():
     key = jax.random.key(1)
     # flow-only: fast and hl weights zero.
     config = Pi0MEMConfig(
-        paligemma_variant="dummy", action_expert_variant="dummy",
-        fast_loss_weight=0.0, hl_loss_weight=0.0,
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+        fast_loss_weight=0.0,
+        hl_loss_weight=0.0,
     )
     model = config.create(key)
     obs, act = config.fake_obs(1), config.fake_act(1)
@@ -165,8 +186,10 @@ def test_flow_loss_does_not_touch_backbone_or_video():
 def test_fast_loss_trains_backbone_and_video():
     key = jax.random.key(2)
     config = Pi0MEMConfig(
-        paligemma_variant="dummy", action_expert_variant="dummy",
-        ll_loss_weight=0.0, hl_loss_weight=0.0,
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+        ll_loss_weight=0.0,
+        hl_loss_weight=0.0,
     )
     model = config.create(key)
     obs, act = _fast_action_obs(config, 1), config.fake_act(1)
@@ -176,16 +199,18 @@ def test_fast_loss_trains_backbone_and_video():
 
 
 def test_get_prefix_weights_linear_matches_reference():
-    from openpi.models.pi0_mem import get_prefix_weights
     import numpy as np
+
+    from openpi.models.pi0_mem import get_prefix_weights
 
     w = np.asarray(get_prefix_weights(2, 6, 10, "linear"))
     np.testing.assert_allclose(w, [1, 1, 0.8, 0.6, 0.4, 0.2, 0, 0, 0, 0], atol=1e-6)
 
 
 def test_get_prefix_weights_schedules():
-    from openpi.models.pi0_mem import get_prefix_weights
     import numpy as np
+
+    from openpi.models.pi0_mem import get_prefix_weights
 
     # ones: all 1 except positions >= end
     np.testing.assert_allclose(np.asarray(get_prefix_weights(0, 4, 6, "ones")), [1, 1, 1, 1, 0, 0])
@@ -207,8 +232,12 @@ def test_sample_actions_rtc_shape():
     key, config, model, obs = _rtc_model_and_obs()
     prev = jnp.zeros((1, config.action_horizon, config.action_dim))
     out = nnx_utils.module_jit(model.sample_actions_rtc)(
-        key, obs, prev_action_chunk=prev, inference_delay=1,
-        prefix_attention_horizon=config.action_horizon, num_steps=4,
+        key,
+        obs,
+        prev_action_chunk=prev,
+        inference_delay=1,
+        prefix_attention_horizon=config.action_horizon,
+        num_steps=4,
     )
     assert out.shape == (1, config.action_horizon, config.action_dim)
 
@@ -221,8 +250,13 @@ def test_sample_actions_rtc_guidance_off_matches_plain():
     prev = jnp.ones((1, config.action_horizon, config.action_dim))  # irrelevant when weights==0
     plain = nnx_utils.module_jit(model.sample_actions)(key, obs, num_steps=4, noise=noise)
     rtc = nnx_utils.module_jit(model.sample_actions_rtc)(
-        key, obs, prev_action_chunk=prev, inference_delay=0,
-        prefix_attention_horizon=0, num_steps=4, noise=noise,
+        key,
+        obs,
+        prev_action_chunk=prev,
+        inference_delay=0,
+        prefix_attention_horizon=0,
+        num_steps=4,
+        noise=noise,
     )
     assert jnp.allclose(plain, rtc, atol=1e-2)
 
@@ -235,9 +269,15 @@ def test_sample_actions_rtc_pins_prefix():
     prev = jnp.ones((1, config.action_horizon, config.action_dim)) * 0.5
     plain = nnx_utils.module_jit(model.sample_actions)(key, obs, num_steps=8, noise=noise)
     rtc = nnx_utils.module_jit(model.sample_actions_rtc)(
-        key, obs, prev_action_chunk=prev, inference_delay=0,
-        prefix_attention_horizon=config.action_horizon, prefix_attention_schedule="ones",
-        max_guidance_weight=10.0, num_steps=8, noise=noise,
+        key,
+        obs,
+        prev_action_chunk=prev,
+        inference_delay=0,
+        prefix_attention_horizon=config.action_horizon,
+        prefix_attention_schedule="ones",
+        max_guidance_weight=10.0,
+        num_steps=8,
+        noise=noise,
     )
     plain_dist = jnp.mean(jnp.abs(plain - prev))
     rtc_dist = jnp.mean(jnp.abs(rtc - prev))
@@ -245,19 +285,21 @@ def test_sample_actions_rtc_pins_prefix():
 
 
 def test_get_prefix_weights_exp_monotone():
-    from openpi.models.pi0_mem import get_prefix_weights
     import numpy as np
+
+    from openpi.models.pi0_mem import get_prefix_weights
 
     w = np.asarray(get_prefix_weights(2, 6, 10, "exp"))
     assert w.shape == (10,)
-    assert w[0] == 1.0            # below start -> full weight
-    assert w[6] == 0.0            # at/after end -> zero
-    assert np.all(np.diff(w) <= 1e-6)   # monotone non-increasing
+    assert w[0] == 1.0  # below start -> full weight
+    assert w[6] == 0.0  # at/after end -> zero
+    assert np.all(np.diff(w) <= 1e-6)  # monotone non-increasing
     assert np.all((w >= 0) & (w <= 1))
 
 
 def test_get_prefix_weights_invalid_schedule_raises():
     import pytest
+
     from openpi.models.pi0_mem import get_prefix_weights
 
     with pytest.raises(ValueError):

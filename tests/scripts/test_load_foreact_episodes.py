@@ -9,14 +9,36 @@ mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mod)
 
 
-def test_episodes_from_records_all_success():
-    records = [
-        {"goal": "make rice", "subtasks": ["get rice", "cook rice"]},
-        {"goal": "clean", "subtasks": ["wipe"]},
+def test_goal_from_group_drops_leading_date():
+    assert mod.goal_from_group("20251102_Pick_Veg") == "pick veg"
+    assert mod.goal_from_group("Stack_Bowls") == "stack bowls"
+
+
+def test_subtasks_from_task_rows_orders_dedups_drops_terminal():
+    rows = [
+        {"task_index": 2, "task": "Pick up the corn and place it into the plate."},
+        {"task_index": 0, "task": "Pick up the eggplant and place it into the plate."},
+        {"task_index": 1, "task": "Finish."},
+        {"task_index": 3, "task": "pick up the eggplant and place it into the plate."},  # case dup of idx 0
+        {"task_index": 4, "task": "Done"},
     ]
-    eps = mod.episodes_from_records(records)
-    assert len(eps) == 2
-    assert eps[0].goal == "make rice"
-    assert eps[0].subtasks == ["get rice", "cook rice"]
-    assert eps[0].success_flags == [True, True]
-    assert eps[1].success_flags == [True]
+    assert mod.subtasks_from_task_rows(rows) == [
+        "Pick up the eggplant and place it into the plate.",  # task_index 0 first
+        "Pick up the corn and place it into the plate.",
+    ]
+
+
+def test_episode_from_task_rows_all_success():
+    rows = [
+        {"task_index": 1, "task": "wipe the counter."},
+        {"task_index": 0, "task": "rinse the plate."},
+        {"task_index": 2, "task": "Finish."},
+    ]
+    ep = mod.episode_from_task_rows("20251104_Clean_Kitchen", rows)
+    assert ep.goal == "clean kitchen"
+    assert ep.subtasks == ["rinse the plate.", "wipe the counter."]
+    assert ep.success_flags == [True, True]
+
+
+def test_episode_from_task_rows_none_when_only_terminal():
+    assert mod.episode_from_task_rows("g", [{"task_index": 0, "task": "Finish."}]) is None

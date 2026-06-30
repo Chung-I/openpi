@@ -23,3 +23,32 @@ def test_prompt_builders_include_inputs():
     assert "clean kitchen" in jp and "wiped once" in jp and "1. wipe" in jp
     rp = mv.build_reconstruction_prompt(goal="clean kitchen", memory="wiped once")
     assert "clean kitchen" in rp and "wiped once" in rp
+
+
+def test_structural_score_clean_is_high():
+    assert mv.structural_score("Placed eggplant and corn into the plate.") == 1.0
+
+
+def test_structural_score_penalizes_preamble_and_markdown():
+    # "here's" + "thinking"/"analyze" + "**" -> 3 of 6 checks fail -> 0.5
+    assert mv.structural_score("Here's a thinking process:\n\n1. **Analyze**") <= 0.5
+    assert mv.structural_score('{"memory": "x"}') < 1.0
+
+
+def test_determinism_identical_samples_is_one():
+    assert mv.determinism_score(["placed eggplant", "placed eggplant", "placed eggplant"]) == 1.0
+
+
+def test_determinism_divergent_samples_is_low():
+    assert mv.determinism_score(["placed eggplant", "opened the drawer"]) < 0.5
+
+
+def test_determinism_single_sample_is_one():
+    assert mv.determinism_score(["x"]) == 1.0
+
+
+def test_build_coherence_prompt_mentions_both_memories():
+    p = mv.build_coherence_prompt("stack bowls", "1 bowl placed", "2 bowls placed")
+    assert "1 bowl placed" in p
+    assert "2 bowls placed" in p
+    assert "coherence" in p

@@ -1,0 +1,6 @@
+Maintain a compressed running memory for a robot. Update it with the new event.
+Output ONLY the updated memory as 1-2 plain declarative sentences. No preamble, no lists, no markdown.
+Goal: {goal}
+Current memory: {previous_memory}
+New event: {new_event}
+Updated memory:

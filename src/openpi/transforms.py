@@ -289,6 +289,22 @@ class TokenizeFASTInputs(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class TokenizeFASTActions(DataTransformFn):
+    tokenizer: _tokenizer.FASTTokenizer
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "actions" not in data:
+            return data
+        tokens, mask, loss_mask = self.tokenizer.tokenize_actions(np.asarray(data["actions"]))
+        return {
+            **data,
+            "tokenized_action": tokens,
+            "tokenized_action_mask": mask,
+            "tokenized_action_loss_mask": loss_mask,
+        }
+
+
+@dataclasses.dataclass(frozen=True)
 class ExtractFASTActions(DataTransformFn):
     tokenizer: _tokenizer.FASTTokenizer
     action_horizon: int

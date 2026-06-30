@@ -27,6 +27,28 @@ Subtask events so far:
 
 Compressed memory summary:"""
 
+RECURSIVE_FIRST_MEMORY = "(none yet)"
+
+RECURSIVE_MEMORY_PROMPT_TEMPLATE = """You are maintaining a compressed running memory for a robot policy.
+
+You are given the task goal, the robot's CURRENT memory, and the NEW subtask event that
+just occurred. Update the memory so it retains ONLY information still relevant for future
+task execution.
+
+Rules:
+- Start from the current memory; apply the new event as an incremental update
+- Keep completed subtasks represented unless the goal consumes them
+- Aggregate repeated items (e.g., "placed 3 bowls" not individual colors)
+- Drop failed attempts that were later retried successfully
+- Keep counts of remaining items and spatial info relevant to navigation
+- Minimize length while preserving decision-relevant information
+
+Task goal: {goal}
+Current memory: {previous_memory}
+New subtask event: {new_event}
+
+Updated memory:"""
+
 
 @dataclasses.dataclass
 class Episode:
@@ -53,6 +75,10 @@ class MemoryLabelConfig:
     # For "thinking"/reasoning models served via vLLM (e.g. Qwen3): suppress chain-of-thought
     # so the label is the final compressed memory only. Only affects the openai backend.
     disable_thinking: bool = False
+    # Prompt + generation controls for the bake-off harness.
+    prompt_template: str | None = None  # overrides the module template when set
+    generation_mode: Literal["stateless", "recursive"] = "stateless"
+    temperature: float = 0.0
 
     @property
     def resolved_api_key_env(self) -> str:
@@ -69,6 +95,10 @@ def _format_subtask_sequence(subtasks: list[str], success_flags: list[bool], up_
         status = "SUCCESS" if success_flags[i] else "FAILED"
         lines.append(f"{i + 1}. [{status}] {subtasks[i]}")
     return "\n".join(lines)
+
+
+def _format_event(subtask: str, success: bool) -> str:  # noqa: FBT001
+    return f"[{'SUCCESS' if success else 'FAILED'}] {subtask}"
 
 
 class MemoryLabelGenerator:
@@ -101,32 +131,52 @@ class MemoryLabelGenerator:
             raise NotImplementedError("Local LLM backend not yet implemented")
         return self._client
 
-    def _generate_single(self, goal: str, subtask_sequence: str) -> str:
-        prompt = MEMORY_PROMPT_TEMPLATE.format(goal=goal, subtask_sequence=subtask_sequence)
-
+    def _complete(self, prompt: str) -> str:
         if self.config.backend == "mock":
-            return f"Memory summary for: {goal}"
-
+            # mock: content derives from the rendered prompt prefix, not the goal
+            return f"Memory summary for: {prompt[:20]}"
         client = self._get_client()
-
         if self.config.backend == "claude":
-            response = client.messages.create(
+            resp = client.messages.create(
                 model=self.config.model,
                 max_tokens=self.config.max_memory_tokens,
+                temperature=self.config.temperature,
                 messages=[{"role": "user", "content": prompt}],
             )
-            return response.content[0].text
-
+            return resp.content[0].text
         if self.config.backend == "openai":
-            response = client.chat.completions.create(
+            resp = client.chat.completions.create(
                 model=self.config.model,
                 max_tokens=self.config.max_memory_tokens,
+                temperature=self.config.temperature,
                 messages=[{"role": "user", "content": prompt}],
                 **self._chat_extra(),
             )
-            return response.choices[0].message.content
-
+            return resp.choices[0].message.content
         raise ValueError(f"Unknown backend: {self.config.backend}")
+
+    async def _complete_async(self, aclient, prompt: str) -> str:
+        if self.config.backend == "mock":
+            return f"Memory summary for: {prompt[:20]}"
+        resp = await aclient.chat.completions.create(
+            model=self.config.model,
+            max_tokens=self.config.max_memory_tokens,
+            temperature=self.config.temperature,
+            messages=[{"role": "user", "content": prompt}],
+            **self._chat_extra(),
+        )
+        return resp.choices[0].message.content
+
+    def _stateless_prompt(self, goal: str, subtask_sequence: str) -> str:
+        tmpl = self.config.prompt_template or MEMORY_PROMPT_TEMPLATE
+        return tmpl.format(goal=goal, subtask_sequence=subtask_sequence)
+
+    def _recursive_prompt(self, goal: str, previous_memory: str, new_event: str) -> str:
+        tmpl = self.config.prompt_template or RECURSIVE_MEMORY_PROMPT_TEMPLATE
+        return tmpl.format(goal=goal, previous_memory=previous_memory, new_event=new_event)
+
+    def _generate_single(self, goal: str, subtask_sequence: str) -> str:
+        return self._complete(self._stateless_prompt(goal, subtask_sequence))
 
     def _chat_extra(self) -> dict:
         """Extra kwargs for openai chat.completions.create (e.g. suppress reasoning)."""
@@ -149,16 +199,7 @@ class MemoryLabelGenerator:
         raise NotImplementedError(f"async generation not supported for backend {self.config.backend}")
 
     async def _generate_single_async(self, aclient, goal: str, subtask_sequence: str) -> str:
-        if self.config.backend == "mock":
-            return f"Memory summary for: {goal}"
-        prompt = MEMORY_PROMPT_TEMPLATE.format(goal=goal, subtask_sequence=subtask_sequence)
-        resp = await aclient.chat.completions.create(
-            model=self.config.model,
-            max_tokens=self.config.max_memory_tokens,
-            messages=[{"role": "user", "content": prompt}],
-            **self._chat_extra(),
-        )
-        return resp.choices[0].message.content
+        return await self._complete_async(aclient, self._stateless_prompt(goal, subtask_sequence))
 
     async def generate_labels_async(
         self, episodes: list[Episode], out_dir: str | os.PathLike | None = None
@@ -194,19 +235,30 @@ class MemoryLabelGenerator:
 
             async def _run_episode(idx: int, ep: Episode) -> tuple[str, MemoryLabels]:
                 eid = str(idx)
-                coros = [
-                    _run_timestep(ep.goal, _format_subtask_sequence(ep.subtasks, ep.success_flags, i))
-                    for i in range(len(ep.subtasks))
-                ]
-                mems: list[str] = list(await asyncio.gather(*coros))
+                if self.config.generation_mode == "recursive":
+                    async with sem:  # one episode holds a slot for its whole chain
+                        mems: list[str] = []
+                        prev = RECURSIVE_FIRST_MEMORY
+                        for i in range(len(ep.subtasks)):
+                            event = _format_event(ep.subtasks[i], ep.success_flags[i])
+                            m = await self._complete_async(
+                                aclient, self._recursive_prompt(ep.goal, prev, event)
+                            )
+                            mems.append(m)
+                            prev = m
+                else:
+                    coros = [
+                        _run_timestep(ep.goal, _format_subtask_sequence(ep.subtasks, ep.success_flags, i))
+                        for i in range(len(ep.subtasks))
+                    ]
+                    mems = list(await asyncio.gather(*coros))
                 ml = MemoryLabels(episode_id=eid, memories=mems)
                 if out_dir is not None:
                     (out_dir / f"{eid}.json").write_text(json.dumps({"episode_id": eid, "memories": mems}))
                 return eid, ml
 
             episode_results = await asyncio.gather(*[_run_episode(idx, ep) for idx, ep in pending_episodes])
-            for eid, ml in episode_results:
-                results[eid] = ml
+            results.update(episode_results)
 
         return [results[str(idx)] for idx in range(len(episodes))]
 
@@ -220,6 +272,17 @@ class MemoryLabelGenerator:
             List of MemoryLabels, one per episode, each containing one compressed
             memory string per subtask timestep.
         """
+        if self.config.generation_mode == "recursive":
+            all_labels = []
+            for idx, ep in enumerate(episodes):
+                mems, prev = [], RECURSIVE_FIRST_MEMORY
+                for i in range(len(ep.subtasks)):
+                    event = _format_event(ep.subtasks[i], ep.success_flags[i])
+                    m = self._complete(self._recursive_prompt(ep.goal, prev, event))
+                    mems.append(m)
+                    prev = m
+                all_labels.append(MemoryLabels(episode_id=str(idx), memories=mems))
+            return all_labels
         all_labels = []
         for idx, episode in enumerate(episodes):
             episode_labels = []

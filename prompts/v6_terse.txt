@@ -1,0 +1,5 @@
+Update the memory. Be extremely brief.
+Goal: {goal}
+Memory: {previous_memory}
+Event: {new_event}
+New memory:

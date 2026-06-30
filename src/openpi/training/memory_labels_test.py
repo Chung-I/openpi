@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+from openpi.training.memory_labels import RECURSIVE_FIRST_MEMORY
+from openpi.training.memory_labels import RECURSIVE_MEMORY_PROMPT_TEMPLATE
 from openpi.training.memory_labels import Episode
 from openpi.training.memory_labels import MemoryLabelConfig
 from openpi.training.memory_labels import MemoryLabelGenerator
@@ -68,7 +70,7 @@ def test_openai_client_uses_base_url(monkeypatch):
 
     config = MemoryLabelConfig(backend="openai", base_url="http://localhost:8000/v1", model="qwen")
     gen = MemoryLabelGenerator(config)
-    gen._get_client()
+    gen._get_client()  # noqa: SLF001
     assert captured["base_url"] == "http://localhost:8000/v1"
     assert captured["api_key"] == "EMPTY"  # vLLM ignores key; fall back when env unset
 
@@ -200,3 +202,91 @@ def test_generate_labels_async_writes_shard_per_episode(tmp_path):
     import json as _json
 
     assert len(_json.loads((tmp_path / "1.json").read_text())["memories"]) == 1
+
+
+class _RecordingClient:
+    """Sync openai-like client: returns "mem{n}" and records each prompt."""
+
+    def __init__(self):
+        self.prompts = []
+        self._n = 0
+
+        comp = self
+
+        class _Completions:
+            def create(self, **kw):
+                comp.prompts.append(kw["messages"][0]["content"])
+                comp._n += 1  # noqa: SLF001
+                msg = type("M", (), {"content": f"mem{comp._n}"})  # noqa: SLF001
+                return type("R", (), {"choices": [type("C", (), {"message": msg})]})
+
+        self.chat = type("Chat", (), {"completions": _Completions()})
+
+
+def test_recursive_feeds_previous_memory_into_next_prompt():
+    gen = MemoryLabelGenerator(
+        MemoryLabelConfig(backend="openai", model="qwen", generation_mode="recursive")
+    )
+    client = _RecordingClient()
+    gen._client = client  # noqa: SLF001 -- bypass real client construction
+    eps = [Episode(goal="g", subtasks=["a", "b", "c"], success_flags=[True, True, True])]
+    labels = gen.generate_labels(eps)
+    assert labels[0].memories == ["mem1", "mem2", "mem3"]
+    # step 0 seeds with the empty sentinel; later steps embed the prior output
+    assert RECURSIVE_FIRST_MEMORY in client.prompts[0]
+    assert "mem1" in client.prompts[1]
+    assert "mem2" in client.prompts[2]
+
+
+def test_recursive_template_has_required_placeholders():
+    for key in ("{goal}", "{previous_memory}", "{new_event}"):
+        assert key in RECURSIVE_MEMORY_PROMPT_TEMPLATE
+
+
+class _AsyncRecordingClient:
+    """Async openai-like client: returns "mem{n}" and records each prompt."""
+
+    def __init__(self):
+        self.prompts = []
+        self._n = 0
+        comp = self
+
+        class _Completions:
+            async def create(self, **kw):
+                comp.prompts.append(kw["messages"][0]["content"])
+                comp._n += 1  # noqa: SLF001
+                msg = type("M", (), {"content": f"mem{comp._n}"})  # noqa: SLF001
+                return type("R", (), {"choices": [type("C", (), {"message": msg})]})
+
+        self.chat = type("Chat", (), {"completions": _Completions()})
+
+
+def test_recursive_async_feeds_previous_memory(monkeypatch):
+    gen = MemoryLabelGenerator(
+        MemoryLabelConfig(backend="openai", model="qwen", generation_mode="recursive")
+    )
+    client = _AsyncRecordingClient()
+    monkeypatch.setattr(gen, "_get_async_client", lambda: client)
+    eps = [Episode(goal="g", subtasks=["a", "b", "c"], success_flags=[True, True, True])]
+    labels = asyncio.run(gen.generate_labels_async(eps))
+    assert labels[0].memories == ["mem1", "mem2", "mem3"]
+    assert RECURSIVE_FIRST_MEMORY in client.prompts[0]   # step 0 seeded with sentinel
+    assert "mem1" in client.prompts[1]                   # step 1 sees step 0 output
+    assert "mem2" in client.prompts[2]                   # step 2 sees step 1 output
+
+
+def test_temperature_passed_to_create():
+    captured = {}
+    gen = MemoryLabelGenerator(MemoryLabelConfig(backend="openai", model="qwen", temperature=0.7))
+
+    class _C:
+        class chat:  # noqa: N801
+            class completions:  # noqa: N801
+                @staticmethod
+                def create(**kw):
+                    captured.update(kw)
+                    return type("R", (), {"choices": [type("C", (), {"message": type("M", (), {"content": "x"})})]})
+
+    gen._client = _C()  # noqa: SLF001
+    gen._generate_single("g", "1. [SUCCESS] a")  # noqa: SLF001
+    assert captured["temperature"] == 0.7

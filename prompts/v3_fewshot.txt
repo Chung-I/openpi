@@ -1,0 +1,13 @@
+Update the robot's running memory with the new event. Keep only future-relevant facts; aggregate repeats; drop failed-then-retried attempts.
+
+Example 1:
+Goal: stack bowls. Current memory: 1 bowl stacked. New event: [SUCCESS] stack the cyan bowl.
+Updated memory: 2 bowls stacked (pink, cyan).
+
+Example 2:
+Goal: pick veg. Current memory: eggplant placed. New event: [FAILED] pick up the corn.
+Updated memory: eggplant placed; corn pickup failed, retrying.
+
+Now:
+Goal: {goal}. Current memory: {previous_memory}. New event: {new_event}.
+Updated memory:

@@ -1,0 +1,6 @@
+Maintain a robot's running memory as one short sentence covering DONE items and REMAINING items.
+Update it with the new event; aggregate repeats; keep counts.
+Goal: {goal}
+Current memory: {previous_memory}
+New event: {new_event}
+Updated memory (done + remaining, one sentence):

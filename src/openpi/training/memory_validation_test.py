@@ -30,7 +30,8 @@ def test_structural_score_clean_is_high():
 
 
 def test_structural_score_penalizes_preamble_and_markdown():
-    assert mv.structural_score("Here's a thinking process:\n\n1. **Analyze**") < 1.0
+    # "here's" + "thinking"/"analyze" + "**" -> 3 of 6 checks fail -> 0.5
+    assert mv.structural_score("Here's a thinking process:\n\n1. **Analyze**") <= 0.5
     assert mv.structural_score('{"memory": "x"}') < 1.0
 
 

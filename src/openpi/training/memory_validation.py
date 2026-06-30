@@ -53,18 +53,23 @@ def build_reconstruction_prompt(goal: str, memory: str) -> str:
     )
 
 
-_PREAMBLE_MARKERS = ("here's", "here is", "thinking", "let me", "sure,", "okay", "step ", "**", "```", "memory:")
+_PREAMBLE_MARKERS = ("here's", "here is", "let me", "sure,", "okay", "i'll", "i will", "memory:")
+_THINKING_MARKERS = ("thinking", "step ", "first,", "analyze", "reasoning")
+_MARKDOWN_MARKERS = ("**", "```", "##", "- ")
 
 
 def structural_score(memory: str, max_chars: int = 240) -> float:
-    """Fraction of 4 cleanliness checks passed: non-empty, within length band,
-    no preamble/markdown/thinking markers, no JSON wrapper."""
+    """Fraction of 6 cleanliness checks passed: non-empty, within length band, and free of
+    preamble / thinking / markdown markers and a JSON wrapper. Clean prose scores 1.0;
+    each independent dirtiness category lowers the score, so heavily-dirty output scores low."""
     m = memory.strip()
     low = m.lower()
     checks = [
         bool(m),
         len(m) <= max_chars,
-        not any(mark in low for mark in _PREAMBLE_MARKERS),
+        not any(k in low for k in _PREAMBLE_MARKERS),
+        not any(k in low for k in _THINKING_MARKERS),
+        not any(k in m for k in _MARKDOWN_MARKERS),
         not m.startswith(("{", "[")),
     ]
     return sum(checks) / len(checks)

@@ -33,6 +33,7 @@ class Pi0MEMConfig(_model.BaseModelConfig):
     temporal_attn_every_n_layers: int = 4
     max_memory_tokens: int = 128
     max_subtask_tokens: int = 64
+    max_action_tokens: int = 256
     hl_loss_weight: float = 1.0
     ll_loss_weight: float = 1.0
 
@@ -102,6 +103,9 @@ class Pi0MEMConfig(_model.BaseModelConfig):
                 video_states=jax.ShapeDtypeStruct(
                     [batch_size, self.num_video_frames, self.action_dim], jnp.float32
                 ),
+                tokenized_action=jax.ShapeDtypeStruct([batch_size, self.max_action_tokens], jnp.int32),
+                tokenized_action_mask=jax.ShapeDtypeStruct([batch_size, self.max_action_tokens], jnp.bool_),
+                tokenized_action_loss_mask=jax.ShapeDtypeStruct([batch_size, self.max_action_tokens], jnp.bool_),
             )
         action_spec = jax.ShapeDtypeStruct(
             [batch_size, self.action_horizon, self.action_dim], jnp.float32

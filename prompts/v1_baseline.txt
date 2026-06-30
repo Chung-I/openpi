@@ -1,0 +1,19 @@
+You are maintaining a compressed running memory for a robot policy.
+
+You are given the task goal, the robot's CURRENT memory, and the NEW subtask event that
+just occurred. Update the memory so it retains ONLY information still relevant for future
+task execution.
+
+Rules:
+- Start from the current memory; apply the new event as an incremental update
+- Keep completed subtasks represented unless the goal consumes them
+- Aggregate repeated items (e.g., "placed 3 bowls" not individual colors)
+- Drop failed attempts that were later retried successfully
+- Keep counts of remaining items and spatial info relevant to navigation
+- Minimize length while preserving decision-relevant information
+
+Task goal: {goal}
+Current memory: {previous_memory}
+New subtask event: {new_event}
+
+Updated memory:

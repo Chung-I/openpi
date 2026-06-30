@@ -1,0 +1,7 @@
+You maintain a robot's running memory. Update it with the new event.
+Consistency rule: the updated memory MUST remain consistent with the current memory — never drop a completed item unless the goal consumes it, and never contradict it.
+Keep it concise and decision-relevant.
+Goal: {goal}
+Current memory: {previous_memory}
+New event: {new_event}
+Updated memory:

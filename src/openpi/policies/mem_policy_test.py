@@ -92,28 +92,6 @@ def test_mem_policy_step_increments_counter():
     assert policy.step_count == 0
 
 
-class _RecordingModel:
-    """Wraps a real Pi0MEM, recording which sampling method MEMPolicy calls."""
-
-    def __init__(self, real):
-        self._real = real
-        self.action_horizon = real.action_horizon
-        self.action_dim = real.action_dim
-        self.calls = []
-
-    def predict_subtask_and_memory(self, *a, **k):
-        self.calls.append("hl")
-        return self._real.predict_subtask_and_memory(*a, **k)
-
-    def sample_actions(self, *a, **k):
-        self.calls.append("plain")
-        return self._real.sample_actions(*a, **k)
-
-    def sample_actions_rtc(self, *a, **k):
-        self.calls.append("rtc")
-        return self._real.sample_actions_rtc(*a, **k)
-
-
 class _FakeModel:
     """Fully fake Pi0MEM substitute for routing tests — no real model, no XLA compilation.
 

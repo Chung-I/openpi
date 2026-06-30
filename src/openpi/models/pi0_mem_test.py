@@ -242,3 +242,23 @@ def test_sample_actions_rtc_pins_prefix():
     plain_dist = jnp.mean(jnp.abs(plain - prev))
     rtc_dist = jnp.mean(jnp.abs(rtc - prev))
     assert rtc_dist < plain_dist
+
+
+def test_get_prefix_weights_exp_monotone():
+    from openpi.models.pi0_mem import get_prefix_weights
+    import numpy as np
+
+    w = np.asarray(get_prefix_weights(2, 6, 10, "exp"))
+    assert w.shape == (10,)
+    assert w[0] == 1.0            # below start -> full weight
+    assert w[6] == 0.0            # at/after end -> zero
+    assert np.all(np.diff(w) <= 1e-6)   # monotone non-increasing
+    assert np.all((w >= 0) & (w <= 1))
+
+
+def test_get_prefix_weights_invalid_schedule_raises():
+    import pytest
+    from openpi.models.pi0_mem import get_prefix_weights
+
+    with pytest.raises(ValueError):
+        get_prefix_weights(0, 4, 6, "bogus")

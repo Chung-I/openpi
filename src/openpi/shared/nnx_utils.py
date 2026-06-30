@@ -38,6 +38,7 @@ def module_jit(meth: Callable[P, R], *jit_args, **jit_kwargs) -> Callable[P, R]:
     # Cache for jitted functions keyed on non-JAX-array kwargs (e.g. strings).
     # Strings cannot be abstracted by JAX JIT; we bind them via functools.partial
     # and cache a separate compiled function per unique string combination.
+    # Bounded in practice: keyed on the small, finite set of string kwarg values (e.g. RTC schedules).
     _str_jit_cache: dict = {}
 
     @functools.wraps(meth)

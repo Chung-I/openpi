@@ -2,6 +2,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
 import pathlib
 from typing import Literal
 
@@ -148,50 +149,53 @@ class MemoryLabelGenerator:
         )
         return resp.choices[0].message.content
 
-    async def generate_labels_async(self, episodes: list[Episode], out_dir=None) -> list[MemoryLabels]:
+    async def generate_labels_async(
+        self, episodes: list[Episode], out_dir: str | os.PathLike | None = None
+    ) -> list[MemoryLabels]:
         """Concurrency-bounded, resumable async generation. With out_dir, writes one
-        <episode_id>.json shard per episode and skips episodes already written."""
+        <episode_id>.json shard per episode AS SOON AS that episode's timesteps finish,
+        so a mid-run crash keeps already-completed episodes. Episodes already on disk are
+        loaded and skipped (cross-run resume). Shards are POSITIONAL (episode_id =
+        str(index)) — do not reuse out_dir across a different or reordered episode set."""
         out_dir = pathlib.Path(out_dir) if out_dir is not None else None
         if out_dir is not None:
             out_dir.mkdir(parents=True, exist_ok=True)
 
         results: dict[str, MemoryLabels] = {}
-        pending: list[tuple[str, int, str, str]] = []
+        pending_episodes: list[tuple[int, Episode]] = []
+
         for idx, ep in enumerate(episodes):
             eid = str(idx)
             shard = (out_dir / f"{eid}.json") if out_dir is not None else None
             if shard is not None and shard.exists():
                 data = json.loads(shard.read_text())
                 results[eid] = MemoryLabels(episode_id=data["episode_id"], memories=data["memories"])
-                continue
-            for i in range(len(ep.subtasks)):
-                seq = _format_subtask_sequence(ep.subtasks, ep.success_flags, i)
-                pending.append((eid, i, ep.goal, seq))
+            else:
+                pending_episodes.append((idx, ep))
 
-        if pending:
+        if pending_episodes:
             aclient = self._get_async_client()
             sem = asyncio.Semaphore(self.config.max_concurrency)
 
-            async def _run(eid, i, goal, seq):
+            async def _run_timestep(goal: str, seq: str) -> str:
                 async with sem:
-                    mem = await self._generate_single_async(aclient, goal, seq)
-                return eid, i, mem
+                    return await self._generate_single_async(aclient, goal, seq)
 
-            done = await asyncio.gather(*[_run(*p) for p in pending])
-        else:
-            done = []
-        by_ep: dict[str, dict[int, str]] = {}
-        for eid, i, mem in done:
-            by_ep.setdefault(eid, {})[i] = mem
+            async def _run_episode(idx: int, ep: Episode) -> tuple[str, MemoryLabels]:
+                eid = str(idx)
+                coros = [
+                    _run_timestep(ep.goal, _format_subtask_sequence(ep.subtasks, ep.success_flags, i))
+                    for i in range(len(ep.subtasks))
+                ]
+                mems: list[str] = list(await asyncio.gather(*coros))
+                ml = MemoryLabels(episode_id=eid, memories=mems)
+                if out_dir is not None:
+                    (out_dir / f"{eid}.json").write_text(json.dumps({"episode_id": eid, "memories": mems}))
+                return eid, ml
 
-        for idx, ep in enumerate(episodes):
-            eid = str(idx)
-            if eid in results:
-                continue
-            mems = [by_ep[eid][i] for i in range(len(ep.subtasks))]
-            results[eid] = MemoryLabels(episode_id=eid, memories=mems)
-            if out_dir is not None:
-                (out_dir / f"{eid}.json").write_text(json.dumps({"episode_id": eid, "memories": mems}))
+            episode_results = await asyncio.gather(*[_run_episode(idx, ep) for idx, ep in pending_episodes])
+            for eid, ml in episode_results:
+                results[eid] = ml
 
         return [results[str(idx)] for idx in range(len(episodes))]
 

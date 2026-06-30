@@ -34,6 +34,13 @@ def main():
     episodes = json.loads(pathlib.Path(args.episodes_file).read_text())
     labels = json.loads(pathlib.Path(args.labels_file).read_text())
 
+    if len(episodes) != len(labels):
+        print(
+            f"WARNING: len(episodes)={len(episodes)} != len(labels)={len(labels)}"
+            " — zip will truncate silently; upstream stage may be broken",
+            flush=True,
+        )
+
     comps, faiths, flagged = [], [], []
     for ep, lab in zip(episodes, labels, strict=False):
         subtasks, flags = ep["subtasks"], ep["success_flags"]
@@ -59,7 +66,7 @@ def main():
     # Sampled judge + reconstruction probe (skipped for mock).
     pairs = [(ep, lab, i) for ep, lab in zip(episodes, labels, strict=False) for i in range(len(lab["memories"]))]
     sample = random.sample(pairs, min(args.sample, len(pairs)))
-    judge_scores, probe = [], {"n": 0, "match": 0}
+    judge_scores, judge_parsed, probe = [], [], {"n": 0, "match": 0}
     if args.backend != "mock":
         for ep, lab, i in sample:
             history = _format_subtask_sequence(ep["subtasks"], ep["success_flags"], i)
@@ -67,21 +74,48 @@ def main():
             jp = mv.build_judge_prompt(ep["goal"], history, memory)
             jr = client.chat.completions.create(model=cfg.model, max_tokens=64,
                                                 messages=[{"role": "user", "content": jp}])
-            judge_scores.append(jr.choices[0].message.content)
+            raw = jr.choices[0].message.content
+            judge_scores.append(raw)
+            # Attempt to parse structured judge response for numeric score distribution.
+            try:
+                parsed = json.loads(raw)
+                judge_parsed.append({
+                    "faithfulness": parsed.get("faithfulness"),
+                    "decision_relevance": parsed.get("decision_relevance"),
+                    "conciseness": parsed.get("conciseness"),
+                })
+            except (json.JSONDecodeError, AttributeError):
+                pass
             if i + 1 < len(ep["subtasks"]):
                 rp = mv.build_reconstruction_prompt(ep["goal"], memory)
                 rr = client.chat.completions.create(model=cfg.model, max_tokens=32,
                                                     messages=[{"role": "user", "content": rp}])
                 pred = rr.choices[0].message.content.strip().lower()
                 probe["n"] += 1
-                if ep["subtasks"][i + 1].lower() in pred or pred in ep["subtasks"][i + 1].lower():
+                # Guard: empty pred is a substring of everything; do not count as a match.
+                if pred and (ep["subtasks"][i + 1].lower() in pred or pred in ep["subtasks"][i + 1].lower()):
                     probe["match"] += 1
+
+    def _mean_parsed(key: str) -> float | None:
+        vals = [d[key] for d in judge_parsed if isinstance(d.get(key), (int, float))]
+        return statistics.mean(vals) if vals else None
+
+    judge_means = {
+        "faithfulness": _mean_parsed("faithfulness"),
+        "decision_relevance": _mean_parsed("decision_relevance"),
+        "conciseness": _mean_parsed("conciseness"),
+    }
     report["judge_sample"] = judge_scores
+    report["judge_scores_mean"] = judge_means
     report["reconstruction_probe"] = probe
 
     base = pathlib.Path(args.report)
     base.parent.mkdir(parents=True, exist_ok=True)
     base.with_suffix(".json").write_text(json.dumps(report, indent=2))
+
+    def _fmt(v) -> str:
+        return f"{v:.3f}" if v is not None else "n/a"
+
     base.with_suffix(".md").write_text(
         f"# Memory label validation\n\n"
         f"- labels: {report['n_labels']}\n"
@@ -89,6 +123,9 @@ def main():
         f"- faithfulness (mean): {report['faithfulness_mean']:.3f}\n"
         f"- low-faithfulness flagged: {report['n_flagged_low_faithfulness']}\n"
         f"- reconstruction probe: {probe['match']}/{probe['n']} match\n"
+        f"- judge faithfulness (mean): {_fmt(judge_means['faithfulness'])}\n"
+        f"- judge decision_relevance (mean): {_fmt(judge_means['decision_relevance'])}\n"
+        f"- judge conciseness (mean): {_fmt(judge_means['conciseness'])}\n"
     )
     print(f"Validation report written to {base.with_suffix('.json')} / .md")
 

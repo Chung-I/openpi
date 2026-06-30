@@ -136,3 +136,18 @@ def test_generate_labels_async_full_resume_no_client(tmp_path):
     (tmp_path / "0.json").write_text(json.dumps({"episode_id": "0", "memories": ["DONE"]}))
     labels = asyncio.run(gen.generate_labels_async(eps, out_dir=tmp_path))
     assert labels[0].memories == ["DONE"]
+
+
+def test_generate_labels_async_writes_shard_per_episode(tmp_path):
+    config = MemoryLabelConfig(backend="mock", max_concurrency=4)
+    gen = MemoryLabelGenerator(config)
+    eps = [
+        Episode(goal="g0", subtasks=["a", "b"], success_flags=[True, True]),
+        Episode(goal="g1", subtasks=["c"], success_flags=[True]),
+    ]
+    asyncio.run(gen.generate_labels_async(eps, out_dir=tmp_path))
+    # Each episode got its own shard written (durable resume granularity).
+    assert (tmp_path / "0.json").exists()
+    assert (tmp_path / "1.json").exists()
+    import json as _json
+    assert len(_json.loads((tmp_path / "1.json").read_text())["memories"]) == 1

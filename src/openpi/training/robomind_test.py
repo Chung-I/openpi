@@ -258,11 +258,28 @@ def test_fetch_task_frames_h5_extracts_only_wanted(tmp_path):
     assert not _glob.glob(f"{cache}/**/222/data/trajectory.hdf5", recursive=True)
 
     # a later call for "222" extracts it; the already-present "111" is reused without re-streaming
-    out2 = rm.fetch_task_frames_h5("repo", "mytask", [rid1, rid2], cache, part_paths=[str(p0), str(p1)])
+    out2 = rm.fetch_task_frames_h5("repo", "mytask", [rid1, rid2], cache,
+                                   part_paths=[str(p0), str(p1)], cleanup_parts=True)
     assert set(out2) == {"111", "222"}
     assert pathlib.Path(out2["222"]).read_bytes() == b"h5-222"
+    # caller-supplied part_paths are never deleted, even with cleanup_parts=True
+    assert p0.exists()
+    assert p1.exists()
 
 
 def test_member_of():
     rid = "h5_franka_1rgb/bread_in_basket/success_episodes/train/1016_161244/data"
     assert rm._member_of(rid) == "bread_in_basket/success_episodes/train/1016_161244/data/trajectory.hdf5"  # noqa: SLF001
+
+
+def test_delete_part_blobs(tmp_path):
+    # HF cache layout: a snapshot symlink pointing at a content-addressed blob; both must be removed
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    blob = blobs / "deadbeef"
+    blob.write_bytes(b"x" * 1000)
+    link = tmp_path / "task.tar.gz.part-aa"
+    link.symlink_to(blob)
+    rm._delete_part_blobs([str(link)])  # noqa: SLF001
+    assert not link.exists()
+    assert not blob.exists()

@@ -24,12 +24,16 @@ def main():
     p.add_argument("--fps", type=float, default=10.0)
     p.add_argument("--sample-hz", type=float, default=1.0)
     p.add_argument("--max-episodes", type=int, default=None)
+    p.add_argument("--cleanup-parts", action="store_true",
+                   help="delete each task's downloaded ~400GB archive after extraction (needed under a "
+                        "storage quota, e.g. the 2.4TB franka_3rgb subset)")
     args = p.parse_args()
 
     records = json.loads(pathlib.Path(args.records_file).read_text())
     labels = json.loads(pathlib.Path(args.labels_file).read_text())
     rm.assemble(records, labels, out_dir=args.out_dir, cache_dir=args.cache_dir,
-                fps_default=args.fps, sample_hz=args.sample_hz, max_episodes=args.max_episodes)
+                fps_default=args.fps, sample_hz=args.sample_hz, max_episodes=args.max_episodes,
+                cleanup_parts=args.cleanup_parts)
 
 
 if __name__ == "__main__":

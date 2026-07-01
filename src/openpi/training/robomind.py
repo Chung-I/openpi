@@ -159,6 +159,7 @@ def read_camera_top_frames(h5_path: str, indices: list[int], size: int = 224) ->
 def assemble(
     records: list[dict], labels: list[dict], *, out_dir, cache_dir,
     fps_default: float = 10.0, sample_hz: float = 1.0, max_episodes: int | None = None,
+    cleanup_parts: bool = False,
 ) -> list[dict]:
     import itertools
     import shutil
@@ -186,7 +187,7 @@ def assemble(
         grp = list(task_items)
         record_ids = [rec["id"] for rec, _, _ in grp]
         try:
-            h5map = fetch_task_frames_h5(REPO, task, record_ids, cache_dir)
+            h5map = fetch_task_frames_h5(REPO, task, record_ids, cache_dir, cleanup_parts=cleanup_parts)
         except Exception as e:  # a whole task archive failed to fetch -> skip it, keep the run going
             print(f"skip task {task}: {type(e).__name__}: {e}", flush=True)
             continue
@@ -226,6 +227,20 @@ def _download_task_parts(repo: str, task: str) -> list[str]:
     return [huggingface_hub.hf_hub_download(repo, repo_type="dataset", filename=p) for p in parts]
 
 
+def _delete_part_blobs(part_paths: list[str]) -> None:
+    """Delete downloaded tar-part files (the HF snapshot symlink + the blob it points at) to reclaim
+    disk. A ~400GB task archive otherwise lingers in the HF cache after extraction; deleting per task
+    keeps peak usage to one task's parts, which matters under a storage quota (e.g. 2.4TB franka_3rgb)."""
+    import contextlib
+    import os
+
+    for p in part_paths:
+        blob = os.path.realpath(p)
+        for target in (blob, p):
+            with contextlib.suppress(OSError):
+                os.remove(target)
+
+
 def _member_of(record_id: str) -> str:
     """Archive member for a record: drop the embodiment prefix and append trajectory.hdf5.
     `h5_franka_1rgb/bread_in_basket/success_episodes/train/1016_161244/data`
@@ -254,12 +269,16 @@ def _stream_extract_members(part_paths: list[str], members: list[str], dest: pat
         cat.wait()
 
 
-def fetch_task_frames_h5(repo: str, task: str, record_ids, cache_dir, *, part_paths=None) -> dict[str, str]:
+def fetch_task_frames_h5(
+    repo: str, task: str, record_ids, cache_dir, *, part_paths=None, cleanup_parts: bool = False
+) -> dict[str, str]:
     """Stream the task's tar parts once and extract ONLY the trajectory.hdf5 members for `record_ids`
     -- instead of reassembling + extracting the whole ~400GB archive to read a few frames. Returns
     {timestamp: local_hdf5_path}. Idempotent: already-extracted timestamps are reused, so a resumed
     run only streams for the ones still missing. Pass `part_paths` to bypass the HF download (used by
-    tests). The caller deletes cache_dir/<task> when done with the task."""
+    tests). With `cleanup_parts=True`, the downloaded parts are deleted after extraction so peak disk
+    stays at one task's archive (needed for large subsets under a storage quota). The caller deletes
+    cache_dir/<task> when done with the task."""
     import glob
 
     dest = pathlib.Path(cache_dir) / task
@@ -280,10 +299,13 @@ def fetch_task_frames_h5(repo: str, task: str, record_ids, cache_dir, *, part_pa
     if not wanted_members:
         return result
 
-    if part_paths is None:
+    downloaded = part_paths is None
+    if downloaded:
         part_paths = _download_task_parts(repo, task)
     dest.mkdir(parents=True, exist_ok=True)
     _stream_extract_members(part_paths, wanted_members, dest)
+    if cleanup_parts and downloaded:  # reclaim the ~400GB archive once its frames are extracted
+        _delete_part_blobs(part_paths)
 
     for rid in record_ids:
         ts = rid.split("/")[-2]

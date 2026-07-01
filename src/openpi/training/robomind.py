@@ -113,12 +113,15 @@ def _task_of(record_id: str) -> str:
     return record_id.split("/")[1]
 
 
-def _decode_resize(raw, size: int = 224):
+def _decode_resize(raw, size: int = 224) -> np.ndarray:
     import cv2
 
     arr = np.asarray(raw)
     if arr.ndim == 1:  # encoded JPEG bytes
-        arr = cv2.imdecode(arr, cv2.IMREAD_COLOR)[:, :, ::-1]  # BGR -> RGB
+        decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if decoded is None:
+            raise ValueError(f"cv2.imdecode failed on 1-D input of shape {arr.shape}")
+        arr = decoded[:, :, ::-1]  # BGR -> RGB
     return cv2.resize(arr, (size, size)).astype(np.uint8)
 
 
@@ -132,7 +135,7 @@ def read_fps(h5_path: str, default: float) -> float:
     return float(default)
 
 
-def read_camera_top_frames(h5_path: str, indices: list[int], size: int = 224) -> dict:
+def read_camera_top_frames(h5_path: str, indices: list[int], size: int = 224) -> dict[int, np.ndarray]:
     import h5py
 
     out = {}
@@ -146,15 +149,20 @@ def read_camera_top_frames(h5_path: str, indices: list[int], size: int = 224) ->
 
 def fetch_task_hdf5(repo: str, record_id: str, cache_dir: str) -> str:
     """Download the record's task-tar parts, reassemble+extract into cache_dir/<task>, and return
-    the episode's trajectory.hdf5. Caches per task; the caller deletes cache_dir/<task> when done."""
+    the episode's trajectory.hdf5. Caches per task (guarded by a .done sentinel); the caller deletes
+    cache_dir/<task> when done."""
     import glob
+    import shutil
     import tarfile
 
     import huggingface_hub
 
     task = _task_of(record_id)
     dest = pathlib.Path(cache_dir) / task
-    if not dest.exists():
+    done = dest / ".done"
+    if not done.exists():
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)  # clean a stale partial extract
         files = huggingface_hub.list_repo_files(repo, repo_type="dataset")
         parts = sorted(f for f in files if f"/{task}.tar.gz.part-" in f)
         if not parts:
@@ -164,10 +172,12 @@ def fetch_task_hdf5(repo: str, record_id: str, cache_dir: str) -> str:
         tar_path = dest / f"{task}.tar.gz"
         with open(tar_path, "wb") as out:
             for lp in local:
-                out.write(pathlib.Path(lp).read_bytes())
+                with open(lp, "rb") as pf:
+                    shutil.copyfileobj(pf, out)
         with tarfile.open(tar_path, "r:gz") as tf:
             tf.extractall(dest)
         tar_path.unlink()
+        done.touch()
     ts = record_id.split("/")[-2]
     hits = glob.glob(f"{dest}/**/{ts}/data/trajectory.hdf5", recursive=True)
     if not hits:

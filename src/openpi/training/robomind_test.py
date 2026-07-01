@@ -121,3 +121,10 @@ def test_read_fps_default_when_missing(tmp_path):
     with h5py.File(p, "w") as f:
         f.create_group("rgb_images").create_dataset("camera_top", data=np.zeros((2, 4, 4, 3), np.uint8))
     assert rm.read_fps(str(p), default=7.5) == 7.5
+
+
+def test_decode_resize_raises_on_bad_jpeg():
+    import numpy as np
+
+    with pytest.raises(ValueError, match="cv2.imdecode failed"):
+        rm._decode_resize(np.array([0, 1, 2, 3, 4], dtype=np.uint8))  # noqa: SLF001 -- not a valid JPEG -> imdecode None

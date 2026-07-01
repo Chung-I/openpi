@@ -22,7 +22,9 @@ import json
 import logging
 import pathlib
 
-from openpi.training.memory_labels import Episode, MemoryLabelConfig, MemoryLabelGenerator
+from openpi.training.memory_labels import Episode
+from openpi.training.memory_labels import MemoryLabelConfig
+from openpi.training.memory_labels import MemoryLabelGenerator
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -43,6 +45,18 @@ def main():
     parser.add_argument("--base_url", type=str, default=None)
     parser.add_argument("--max_concurrency", type=int, default=64)
     parser.add_argument("--out_dir", type=str, default=None, help="per-episode shard dir (resume)")
+    parser.add_argument(
+        "--generation_mode",
+        type=str,
+        default="stateless",
+        choices=["stateless", "recursive"],
+        help="recursive = train-inference-aligned m_{t+1}=f(m_t, event) (uses the recursive template)",
+    )
+    parser.add_argument(
+        "--disable_thinking",
+        action="store_true",
+        help="suppress chain-of-thought for reasoning models (e.g. Qwen3 via vLLM)",
+    )
     args = parser.parse_args()
 
     config = MemoryLabelConfig(
@@ -51,6 +65,8 @@ def main():
         max_memory_tokens=args.max_memory_tokens,
         base_url=args.base_url,
         max_concurrency=args.max_concurrency,
+        generation_mode=args.generation_mode,
+        disable_thinking=args.disable_thinking,
     )
 
     with open(args.episodes_file) as f:

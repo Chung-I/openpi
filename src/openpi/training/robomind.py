@@ -184,9 +184,9 @@ def assemble(
     rows = []
     for task, task_items in itertools.groupby(items, key=lambda it: it[2]):
         grp = list(task_items)
-        timestamps = {rec["id"].split("/")[-2] for rec, _, _ in grp}
+        record_ids = [rec["id"] for rec, _, _ in grp]
         try:
-            h5map = fetch_task_frames_h5(REPO, task, timestamps, cache_dir)
+            h5map = fetch_task_frames_h5(REPO, task, record_ids, cache_dir)
         except Exception as e:  # a whole task archive failed to fetch -> skip it, keep the run going
             print(f"skip task {task}: {type(e).__name__}: {e}", flush=True)
             continue
@@ -216,36 +216,6 @@ def assemble(
     return rows
 
 
-class _ConcatReader:
-    """Read the ordered .tar.gz.part-* files as one continuous byte stream. The parts are a plain
-    binary split of a single gzip stream, so concatenating their bytes reconstructs it -- letting
-    tarfile stream the ~400GB archive without ever writing a reassembled copy to disk."""
-
-    def __init__(self, paths):
-        self._paths = list(paths)
-        self._i = 0
-        self._f = open(self._paths[0], "rb") if self._paths else None  # noqa: SIM115
-
-    def read(self, size: int = -1) -> bytes:
-        out = bytearray()
-        while self._f is not None and size != 0:
-            chunk = self._f.read(size if size and size > 0 else -1)
-            if chunk:
-                out += chunk
-                if size and size > 0:
-                    size -= len(chunk)
-            else:  # current part exhausted -> advance to the next one
-                self._f.close()
-                self._i += 1
-                self._f = open(self._paths[self._i], "rb") if self._i < len(self._paths) else None  # noqa: SIM115
-        return bytes(out)
-
-    def close(self) -> None:
-        if self._f is not None:
-            self._f.close()
-            self._f = None
-
-
 def _download_task_parts(repo: str, task: str) -> list[str]:
     import huggingface_hub
 
@@ -256,14 +226,41 @@ def _download_task_parts(repo: str, task: str) -> list[str]:
     return [huggingface_hub.hf_hub_download(repo, repo_type="dataset", filename=p) for p in parts]
 
 
-def fetch_task_frames_h5(repo: str, task: str, timestamps, cache_dir, *, part_paths=None) -> dict[str, str]:
-    """Stream the task's tar parts once and extract ONLY the trajectory.hdf5 members whose episode
-    timestamp is in `timestamps` -- instead of reassembling + extracting the whole ~400GB archive to
-    read a few frames. Returns {timestamp: local_hdf5_path}. Idempotent: already-extracted timestamps
-    are reused, so a resumed run only streams for the ones still missing. Pass `part_paths` to bypass
-    the HF download (used by tests). The caller deletes cache_dir/<task> when done with the task."""
+def _member_of(record_id: str) -> str:
+    """Archive member for a record: drop the embodiment prefix and append trajectory.hdf5.
+    `h5_franka_1rgb/bread_in_basket/success_episodes/train/1016_161244/data`
+    -> `bread_in_basket/success_episodes/train/1016_161244/data/trajectory.hdf5`."""
+    return "/".join(record_id.split("/")[1:]) + "/trajectory.hdf5"
+
+
+def _stream_extract_members(part_paths: list[str], members: list[str], dest: pathlib.Path) -> None:
+    """`cat parts | tar -xz --occurrence=1 <exact members>` -- the parts are a binary split of one
+    gzip stream, so cat reconstructs it and GNU tar decompresses + extracts only the named members at
+    C speed (no reassembled copy, low RAM). Exact names (no wildcards) are matched identically across
+    tar versions -- `--wildcards '*/...'` does NOT span slashes on GNU tar 1.34. `--occurrence=1` lets
+    tar stop reading once every named member has been found. tar exits nonzero when a member is absent;
+    that is fine here -- the caller resolves what was actually extracted by globbing."""
+    import subprocess
+
+    cat = subprocess.Popen(["cat", *part_paths], stdout=subprocess.PIPE)
+    try:
+        tar = subprocess.Popen(
+            ["tar", "-xz", "--occurrence=1", "-C", str(dest), *members],
+            stdin=cat.stdout,
+        )
+        cat.stdout.close()  # let cat receive SIGPIPE if tar exits early
+        tar.wait()
+    finally:
+        cat.wait()
+
+
+def fetch_task_frames_h5(repo: str, task: str, record_ids, cache_dir, *, part_paths=None) -> dict[str, str]:
+    """Stream the task's tar parts once and extract ONLY the trajectory.hdf5 members for `record_ids`
+    -- instead of reassembling + extracting the whole ~400GB archive to read a few frames. Returns
+    {timestamp: local_hdf5_path}. Idempotent: already-extracted timestamps are reused, so a resumed
+    run only streams for the ones still missing. Pass `part_paths` to bypass the HF download (used by
+    tests). The caller deletes cache_dir/<task> when done with the task."""
     import glob
-    import tarfile
 
     dest = pathlib.Path(cache_dir) / task
 
@@ -272,35 +269,24 @@ def fetch_task_frames_h5(repo: str, task: str, timestamps, cache_dir, *, part_pa
         return hits[0] if hits else None
 
     result = {}
-    wanted = set()
-    for ts in timestamps:
+    wanted_members = []
+    for rid in record_ids:
+        ts = rid.split("/")[-2]
         hit = _find(ts)
         if hit:
             result[ts] = hit
         else:
-            wanted.add(ts)
-    if not wanted:
+            wanted_members.append(_member_of(rid))
+    if not wanted_members:
         return result
 
     if part_paths is None:
         part_paths = _download_task_parts(repo, task)
     dest.mkdir(parents=True, exist_ok=True)
-    reader = _ConcatReader(part_paths)
-    try:
-        with tarfile.open(fileobj=reader, mode="r|gz") as tf:  # streaming, no seek/reassembly
-            for m in tf:
-                if not m.name.endswith("/data/trajectory.hdf5"):
-                    continue
-                ts = m.name.split("/")[-3]
-                if ts in wanted:
-                    tf.extract(m, dest)  # trusted RoboMIND archive
-                    wanted.discard(ts)
-                    if not wanted:  # got everything this task needs -> stop decompressing early
-                        break
-    finally:
-        reader.close()
+    _stream_extract_members(part_paths, wanted_members, dest)
 
-    for ts in timestamps:
+    for rid in record_ids:
+        ts = rid.split("/")[-2]
         if ts not in result:
             hit = _find(ts)
             if hit:

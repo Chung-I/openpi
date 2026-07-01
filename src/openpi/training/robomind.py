@@ -147,6 +147,44 @@ def read_camera_top_frames(h5_path: str, indices: list[int], size: int = 224) ->
     return out
 
 
+def assemble(
+    records: list[dict], labels: list[dict], *, out_dir, cache_dir,
+    fps_default: float = 10.0, sample_hz: float = 1.0, max_episodes: int | None = None,
+) -> list[dict]:
+    import shutil
+
+    from PIL import Image
+
+    out_dir = pathlib.Path(out_dir)
+    frames_dir = out_dir / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    n = len(records) if max_episodes is None else min(max_episodes, len(records))
+    rows = []
+    for i in range(n):
+        rec = records[i]
+        mems = labels[i]["memories"]
+        task = _task_of(rec["id"])
+        try:
+            h5 = fetch_task_hdf5(REPO, rec["id"], cache_dir)
+            fps = read_fps(h5, fps_default)
+            samples = build_samples(rec, mems, fps, sample_hz)
+            imgs = read_camera_top_frames(h5, sorted({s["frame"] for s in samples}))
+        except Exception as e:  # skip a bad episode, keep the run going
+            print(f"skip {rec['id']}: {type(e).__name__}: {e}", flush=True)
+            continue
+        stem = rec["id"].replace("/", "_")
+        for s in samples:
+            rel = f"frames/{stem}_{s['frame']}.jpg"
+            Image.fromarray(imgs[s["frame"]]).save(out_dir / rel)
+            s["image"] = rel
+            rows.append(s)
+        # extract-and-discard: free the task cache once this episode's task is consumed
+        shutil.rmtree(pathlib.Path(cache_dir) / task, ignore_errors=True)
+    (out_dir / "manifest.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    print(f"Wrote {len(rows)} HL samples -> {out_dir / 'manifest.jsonl'}")
+    return rows
+
+
 def fetch_task_hdf5(repo: str, record_id: str, cache_dir: str) -> str:
     """Download the record's task-tar parts, reassemble+extract into cache_dir/<task>, and return
     the episode's trajectory.hdf5. Caches per task (guarded by a .done sentinel); the caller deletes

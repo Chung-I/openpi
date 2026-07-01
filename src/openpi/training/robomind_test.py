@@ -128,3 +128,24 @@ def test_decode_resize_raises_on_bad_jpeg():
 
     with pytest.raises(ValueError, match="cv2.imdecode failed"):
         rm._decode_resize(np.array([0, 1, 2, 3, 4], dtype=np.uint8))  # noqa: SLF001 -- not a valid JPEG -> imdecode None
+
+
+def test_assemble_writes_manifest_and_frames(tmp_path, monkeypatch):
+    import numpy as np
+
+    records = [{"id": "h5_franka_1rgb/t/success_episodes/train/1/data", "goal": "g",
+                "subtasks": ["a", "b"], "frame_ranges": [[0, 10], [10, 20]], "success_flags": [True, True]}]
+    labels = [{"episode_id": "0", "memories": ["m1", "m2"]}]
+    monkeypatch.setattr(rm, "fetch_task_hdf5", lambda repo, rid, cache: "fake.hdf5")
+    monkeypatch.setattr(rm, "read_fps", lambda h5, default: 10.0)
+    monkeypatch.setattr(rm, "read_camera_top_frames",
+                        lambda h5, idxs, size=224: {i: np.zeros((size, size, 3), np.uint8) for i in idxs})
+    rows = rm.assemble(records, labels, out_dir=tmp_path, cache_dir=tmp_path / "cache", max_episodes=1)
+    manifest = (tmp_path / "manifest.jsonl").read_text().strip().splitlines()
+    assert len(manifest) == len(rows)
+    import json as _json
+    first = _json.loads(manifest[0])
+    assert first["image"].startswith("frames/")
+    assert (tmp_path / first["image"]).exists()
+    # a boundary update sample is present with the advanced target
+    assert any(r["update"] and r["target_subtask"] == "b" and r["target_memory"] == "m1" for r in rows)

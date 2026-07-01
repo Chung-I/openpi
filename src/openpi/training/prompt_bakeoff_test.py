@@ -1,13 +1,18 @@
-import json
-import pathlib
-
 from openpi.training import prompt_bakeoff as pb
-from openpi.training.memory_labels import Episode, MemoryLabelConfig, MemoryLabelGenerator, MemoryLabels
+from openpi.training.memory_labels import Episode
+from openpi.training.memory_labels import MemoryLabelConfig
+from openpi.training.memory_labels import MemoryLabels
 
 
 def _good():
-    return dict(faithfulness=0.9, conciseness=0.7, decision_relevance=0.9,
-                temporal_coherence=0.9, determinism=0.8, structural=1.0)
+    return {
+        "faithfulness": 0.9,
+        "conciseness": 0.7,
+        "decision_relevance": 0.9,
+        "temporal_coherence": 0.9,
+        "determinism": 0.8,
+        "structural": 1.0,
+    }
 
 
 def test_composite_rewards_good_prompt():
@@ -15,10 +20,22 @@ def test_composite_rewards_good_prompt():
     assert pb.composite_score(_good()) > 0.7
 
 
+def test_failure_invariance_lowers_composite():
+    # a prompt that moves the memory on failures (low invariance) must score below one that doesn't
+    assert pb.composite_score(dict(_good(), failure_invariance=0.2)) < pb.composite_score(
+        dict(_good(), failure_invariance=1.0)
+    )
+
+
+def test_failure_invariance_defaults_to_one_when_absent():
+    # on all-success slices failure_invariance is absent and is treated as vacuously perfect (1.0)
+    assert pb.composite_score(_good()) == pb.composite_score(dict(_good(), failure_invariance=1.0))
+
+
 def test_gate_rejects_short_but_unfaithful():
     m = _good()
     m["faithfulness"] = 0.1  # below gate
-    m["conciseness"] = 1.0   # maximally short
+    m["conciseness"] = 1.0  # maximally short
     assert pb.composite_score(m) is None
 
 
@@ -33,7 +50,8 @@ def test_rank_puts_gated_out_last():
     bad["decision_relevance"] = 0.1
     ranked = pb.rank_candidates({"good": good, "bad": bad})
     assert ranked[0][0] == "good"
-    assert ranked[-1][0] == "bad" and ranked[-1][1] is None
+    assert ranked[-1][0] == "bad"
+    assert ranked[-1][1] is None
 
 
 def test_score_labels_ranges():
@@ -49,7 +67,8 @@ def test_load_prompts(tmp_path):
     (tmp_path / "a.txt").write_text("A {goal} {previous_memory} {new_event}")
     (tmp_path / "b.txt").write_text("B")
     got = pb.load_prompts(tmp_path)
-    assert set(got) == {"a", "b"} and got["a"].startswith("A ")
+    assert set(got) == {"a", "b"}
+    assert got["a"].startswith("A ")
 
 
 def test_run_bakeoff_mock_ranks_and_writes_shards(tmp_path):

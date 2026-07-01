@@ -3,7 +3,9 @@
 Metric keys are all normalized to [0, 1] by the caller. The gate rejects prompts that
 fall below minimum faithfulness / temporal_coherence / decision_relevance so a
 "short but wrong" prompt cannot win on conciseness. Among gated-in prompts, rank by a
-weighted sum; conciseness contributes only as a bounded bonus above the gate.
+weighted sum. `failure_invariance` (the MEM paper's "don't update memory on a failed
+subtask" behavior) is weighted in; on all-success slices it is absent and defaults to 1.0
+(vacuously invariant), so it only differentiates prompts on data that contains failures.
 """
 
 import asyncio
@@ -17,10 +19,11 @@ from openpi.training.memory_labels import MemoryLabels
 from openpi.training.memory_labels import _format_subtask_sequence
 
 DEFAULT_WEIGHTS = {
-    "faithfulness": 0.25,
-    "temporal_coherence": 0.25,
-    "decision_relevance": 0.20,
-    "determinism": 0.12,
+    "faithfulness": 0.22,
+    "temporal_coherence": 0.20,
+    "decision_relevance": 0.15,
+    "failure_invariance": 0.15,
+    "determinism": 0.10,
     "structural": 0.10,
     "conciseness": 0.08,
 }
@@ -31,12 +34,15 @@ DEFAULT_GATES = {
     "decision_relevance": 0.5,
 }
 
+# Metrics that are vacuously perfect (1.0) when absent (e.g. no failed steps in the slice).
+_MISSING_DEFAULTS = {"failure_invariance": 1.0}
+
 
 def composite_score(metrics: dict, weights: dict = DEFAULT_WEIGHTS, gates: dict = DEFAULT_GATES) -> float | None:
     for key, threshold in gates.items():
         if metrics.get(key, 0.0) < threshold:
             return None
-    return sum(weights[k] * metrics.get(k, 0.0) for k in weights)
+    return sum(weights[k] * metrics.get(k, _MISSING_DEFAULTS.get(k, 0.0)) for k in weights)
 
 
 def rank_candidates(

@@ -3,14 +3,22 @@
 import itertools
 import re
 
-_STOPWORDS = {
-    "the", "a", "an", "and", "or", "to", "in", "on", "of", "for", "with", "at", "is",
-    "was", "i", "it", "into", "from", "by", "that", "this", "then", "have", "has",
-}
+import nltk
+from nltk.stem import PorterStemmer
+
+try:
+    _STOPWORDS = set(nltk.corpus.stopwords.words("english"))
+except LookupError:  # first use on a fresh machine: fetch the small stopwords corpus
+    nltk.download("stopwords", quiet=True)
+    _STOPWORDS = set(nltk.corpus.stopwords.words("english"))
+
+_STEMMER = PorterStemmer()
 
 
 def _content_words(text: str) -> set[str]:
-    return {w for w in re.findall(r"[a-z]+", text.lower()) if w not in _STOPWORDS}
+    """Alphabetic tokens minus NLTK English stopwords, Porter-stemmed so tense/plural
+    variants match (placed<->place, bowls<->bowl) rather than being counted as unfaithful."""
+    return {_STEMMER.stem(w) for w in re.findall(r"[a-z]+", text.lower()) if w not in _STOPWORDS}
 
 
 def compression_ratio(memory: str, cumulative_subtasks: str) -> float:
@@ -86,6 +94,21 @@ def determinism_score(samples: list[str]) -> float:
         union = a | b
         sims.append(1.0 if not union else len(a & b) / len(union))
     return sum(sims) / len(sims)
+
+
+def failure_invariance_scores(
+    memories: list[str], success_flags: list[bool], first_memory: str = "(none yet)"
+) -> list[float]:
+    """Per-[FAILED]-step invariance: the MEM paper requires the memory NOT to move on a failed
+    subtask (only successful subtasks are recorded), which reduces train-inference distribution
+    shift. Score at a failed step t = content-word similarity(m_t, m_{t-1}); 1.0 = unchanged.
+    Returns one score per failed step (empty list when there are no failures)."""
+    out = []
+    for i, ok in enumerate(success_flags):
+        if not ok:
+            prev = memories[i - 1] if i > 0 else first_memory
+            out.append(determinism_score([prev, memories[i]]))
+    return out
 
 
 def build_coherence_prompt(goal: str, prev_memory: str, curr_memory: str) -> str:

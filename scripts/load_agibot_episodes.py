@@ -11,11 +11,13 @@ Usage:
         --max-episodes 1000 --min-subtasks 3
 HF download uses the default HF cache token (see the project's HF_HOME note).
 """
+
 import argparse
 import dataclasses
 import glob
 import json
 import pathlib
+import random
 
 from openpi.training.memory_labels import Episode
 
@@ -71,18 +73,28 @@ def download_task_info(repo: str = REPO, out_dir: str | None = None) -> list[pat
 def main():
     p = argparse.ArgumentParser(description="Load AgiBot World task_info -> Episode JSON")
     p.add_argument("--output", required=True)
-    p.add_argument("--max-episodes", type=int, default=1000)
+    p.add_argument("--max-episodes", type=int, default=None)
+    p.add_argument(
+        "--max-per-task",
+        type=int,
+        default=None,
+        help="cap episodes taken per task_info file, so the set spans all tasks (diversity)",
+    )
     p.add_argument("--min-subtasks", type=int, default=3)
     p.add_argument("--repo", default=REPO)
+    p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
     episodes: list[Episode] = []
     for path in download_task_info(args.repo):
         objs = json.loads(path.read_text())
-        episodes += episodes_from_task_info_list(objs, args.min_subtasks)
-        if len(episodes) >= args.max_episodes:
-            break
-    episodes = episodes[: args.max_episodes]
+        eps = episodes_from_task_info_list(objs, args.min_subtasks)
+        if args.max_per_task:
+            eps = eps[: args.max_per_task]
+        episodes += eps
+    random.Random(args.seed).shuffle(episodes)
+    if args.max_episodes:
+        episodes = episodes[: args.max_episodes]
 
     out = pathlib.Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)

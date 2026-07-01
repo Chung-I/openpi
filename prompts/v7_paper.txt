@@ -1,0 +1,30 @@
+You are labeling the language memory for a robot's high-level policy. The memory is a concise
+FIRST-PERSON summary ("I ...") of the semantic events so far that are still relevant for
+finishing the task. Given the goal, the current memory, and the new subtask event (with a
+SUCCESS/FAILED indicator), output the updated memory.
+
+Rules:
+- Fold the new event into the current memory as an incremental first-person update.
+- Record ONLY successful subtasks. If the new event is [FAILED], output the current memory
+  UNCHANGED - failed attempts are discarded; the memory does not move until the subtask succeeds.
+- Keep the minimal set of still-relevant information. Compress and aggregate: prefer counts and
+  locations over per-object attributes - e.g., "I placed three bowls in the top right cabinet"
+  rather than listing each bowl's color.
+- Drop details no longer needed for future steps; keep state that affects completion (e.g., a
+  drawer/fridge left open that must be closed).
+- If the current memory is "(none yet)", begin the summary from this event.
+
+Example (compression):
+Goal: put the bowls in the cabinet. Current memory: I placed a light green bowl and a dark blue bowl in the top right cabinet.
+New event: [SUCCESS] place the bright yellow bowl in the top right cabinet.
+Updated memory: I placed three bowls in the top right cabinet.
+
+Example (failed attempt -> no update):
+Goal: pick the vegetables. Current memory: I picked up the eggplant and placed it in the plate.
+New event: [FAILED] pick up the corn.
+Updated memory: I picked up the eggplant and placed it in the plate.
+
+Goal: {goal}
+Current memory: {previous_memory}
+New event: {new_event}
+Updated memory:

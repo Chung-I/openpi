@@ -71,3 +71,37 @@ def download_annotation(repo: str = REPO, filename: str = ANNOTATION) -> list[di
 
     p = huggingface_hub.hf_hub_download(repo, repo_type="dataset", filename=filename)
     return json.loads(pathlib.Path(p).read_text())
+
+
+def _mk(eid, goal, idx, m_prev, success, frame, update, tgt_sub, tgt_mem):
+    return {
+        "episode_id": eid, "subtask_index": idx + 1, "frame": int(frame), "update": update,
+        "goal": goal, "input_memory": m_prev, "target_subtask": tgt_sub,
+        "target_memory": tgt_mem, "success": success,
+    }
+
+
+def build_samples(
+    record: dict, memories: list[str], fps: float, sample_hz: float = 1.0, first_memory: str = "(none yet)"
+) -> list[dict]:
+    """1 Hz HL samples: within a subtask the target is (l_i, m_{i-1}) with no update; at the
+    boundary frame e_i it is (l_{i+1}, m_i) on success or (l_i, m_{i-1}) on failure (no update).
+    Last subtask advances to "done"."""
+    subtasks, ranges, flags = record["subtasks"], record["frame_ranges"], record["success_flags"]
+    goal, eid, n = record["goal"], record["id"], len(record["subtasks"])
+    if len(memories) != n:
+        raise ValueError(f"memories ({len(memories)}) != subtasks ({n}) for {eid}")
+    stride = max(1, round(fps / sample_hz))
+    samples = []
+    for idx in range(n):
+        s, e = int(ranges[idx][0]), int(ranges[idx][1])
+        m_prev = first_memory if idx == 0 else memories[idx - 1]
+        l_cur = subtasks[idx]
+        l_next = subtasks[idx + 1] if idx + 1 < n else "done"
+        for f in range(s, e, stride):
+            samples.append(_mk(eid, goal, idx, m_prev, flags[idx], f, False, l_cur, m_prev))  # noqa: FBT003, PERF401
+        if flags[idx]:
+            samples.append(_mk(eid, goal, idx, m_prev, flags[idx], e, True, l_next, memories[idx]))  # noqa: FBT003
+        else:
+            samples.append(_mk(eid, goal, idx, m_prev, flags[idx], e, False, l_cur, m_prev))  # noqa: FBT003
+    return samples

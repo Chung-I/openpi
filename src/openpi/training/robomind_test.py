@@ -130,6 +130,26 @@ def test_decode_resize_raises_on_bad_jpeg():
         rm._decode_resize(np.array([0, 1, 2, 3, 4], dtype=np.uint8))  # noqa: SLF001 -- not a valid JPEG -> imdecode None
 
 
+def test_assemble_raises_on_misaligned_labels(tmp_path):
+    import pytest
+
+    records = [{"id": "h5_franka_1rgb/t/success_episodes/train/1/data", "goal": "g",
+                "subtasks": ["a"], "frame_ranges": [[0, 5]], "success_flags": [True]}]
+    labels = [{"episode_id": "7", "memories": ["m1"]}]  # episode_id != str(0)
+    with pytest.raises(ValueError, match="misaligned"):
+        rm.assemble(records, labels, out_dir=tmp_path, cache_dir=tmp_path / "c")
+
+
+def test_assemble_raises_when_labels_shorter_than_records(tmp_path):
+    import pytest
+
+    records = [{"id": f"h5_franka_1rgb/t/success_episodes/train/{k}/data", "goal": "g",
+                "subtasks": ["a"], "frame_ranges": [[0, 5]], "success_flags": [True]} for k in range(2)]
+    labels = [{"episode_id": "0", "memories": ["m1"]}]  # only 1 label for 2 records
+    with pytest.raises(ValueError, match="shorter"):
+        rm.assemble(records, labels, out_dir=tmp_path, cache_dir=tmp_path / "c")
+
+
 def test_assemble_writes_manifest_and_frames(tmp_path, monkeypatch):
     import numpy as np
 

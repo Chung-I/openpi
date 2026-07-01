@@ -20,6 +20,7 @@ def main():
     if args.max_episodes:
         recs = recs[: args.max_episodes]
     pathlib.Path(args.records_out).parent.mkdir(parents=True, exist_ok=True)
+    pathlib.Path(args.episodes_out).parent.mkdir(parents=True, exist_ok=True)
     pathlib.Path(args.records_out).write_text(json.dumps([dataclasses.asdict(r) for r in recs], indent=2))
     pathlib.Path(args.episodes_out).write_text(
         json.dumps([dataclasses.asdict(rm.to_episode(r)) for r in recs], indent=2)

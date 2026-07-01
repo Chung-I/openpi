@@ -159,26 +159,32 @@ def assemble(
     frames_dir = out_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     n = len(records) if max_episodes is None else min(max_episodes, len(records))
+    if len(labels) < n:
+        raise ValueError(f"labels ({len(labels)}) shorter than records ({n}) - records[i] must pair with labels[i]")
     rows = []
     for i in range(n):
         rec = records[i]
-        mems = labels[i]["memories"]
-        task = _task_of(rec["id"])
+        lab = labels[i]
+        if lab.get("episode_id") not in (None, str(i)):
+            raise ValueError(f"label {i} episode_id={lab.get('episode_id')!r} != str({i}); records/labels misaligned")
         try:
+            mems = lab["memories"]
+            task = _task_of(rec["id"])
             h5 = fetch_task_hdf5(REPO, rec["id"], cache_dir)
             fps = read_fps(h5, fps_default)
             samples = build_samples(rec, mems, fps, sample_hz)
             imgs = read_camera_top_frames(h5, sorted({s["frame"] for s in samples}))
+            stem = rec["id"].replace("/", "_")
+            ep_rows = []
+            for s in samples:
+                rel = f"frames/{stem}_{s['frame']}.jpg"
+                Image.fromarray(imgs[s["frame"]]).save(out_dir / rel)
+                s["image"] = rel
+                ep_rows.append(s)
         except Exception as e:  # skip a bad episode, keep the run going
             print(f"skip {rec['id']}: {type(e).__name__}: {e}", flush=True)
             continue
-        stem = rec["id"].replace("/", "_")
-        for s in samples:
-            rel = f"frames/{stem}_{s['frame']}.jpg"
-            Image.fromarray(imgs[s["frame"]]).save(out_dir / rel)
-            s["image"] = rel
-            rows.append(s)
-        # extract-and-discard: free the task cache once this episode's task is consumed
+        rows.extend(ep_rows)
         shutil.rmtree(pathlib.Path(cache_dir) / task, ignore_errors=True)
     (out_dir / "manifest.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     print(f"Wrote {len(rows)} HL samples -> {out_dir / 'manifest.jsonl'}")

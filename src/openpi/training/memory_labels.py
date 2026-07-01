@@ -29,24 +29,35 @@ Compressed memory summary:"""
 
 RECURSIVE_FIRST_MEMORY = "(none yet)"
 
-RECURSIVE_MEMORY_PROMPT_TEMPLATE = """You are maintaining a compressed running memory for a robot policy.
-
-You are given the task goal, the robot's CURRENT memory, and the NEW subtask event that
-just occurred. Update the memory so it retains ONLY information still relevant for future
-task execution.
+RECURSIVE_MEMORY_PROMPT_TEMPLATE = """You are labeling the language memory for a robot's high-level policy. The memory is a concise
+FIRST-PERSON summary ("I ...") of the semantic events so far that are still relevant for
+finishing the task. Given the goal, the current memory, and the new subtask event (with a
+SUCCESS/FAILED indicator), output the updated memory.
 
 Rules:
-- Start from the current memory; apply the new event as an incremental update
-- Keep completed subtasks represented unless the goal consumes them
-- Aggregate repeated items (e.g., "placed 3 bowls" not individual colors)
-- Drop failed attempts that were later retried successfully
-- Keep counts of remaining items and spatial info relevant to navigation
-- Minimize length while preserving decision-relevant information
+- Fold the new event into the current memory as an incremental first-person update.
+- Record ONLY successful subtasks. If the new event is [FAILED], output the current memory
+  UNCHANGED - failed attempts are discarded; the memory does not move until the subtask succeeds.
+- Keep the minimal set of still-relevant information. Compress and aggregate: prefer counts and
+  locations over per-object attributes - e.g., "I placed three bowls in the top right cabinet"
+  rather than listing each bowl's color.
+- Drop details no longer needed for future steps; keep state that affects completion (e.g., a
+  drawer/fridge left open that must be closed).
+- If the current memory is "(none yet)", begin the summary from this event.
 
-Task goal: {goal}
+Example (compression):
+Goal: put the bowls in the cabinet. Current memory: I placed a light green bowl and a dark blue bowl in the top right cabinet.
+New event: [SUCCESS] place the bright yellow bowl in the top right cabinet.
+Updated memory: I placed three bowls in the top right cabinet.
+
+Example (failed attempt -> no update):
+Goal: pick the vegetables. Current memory: I picked up the eggplant and placed it in the plate.
+New event: [FAILED] pick up the corn.
+Updated memory: I picked up the eggplant and placed it in the plate.
+
+Goal: {goal}
 Current memory: {previous_memory}
-New subtask event: {new_event}
-
+New event: {new_event}
 Updated memory:"""
 
 
@@ -241,9 +252,7 @@ class MemoryLabelGenerator:
                         prev = RECURSIVE_FIRST_MEMORY
                         for i in range(len(ep.subtasks)):
                             event = _format_event(ep.subtasks[i], ep.success_flags[i])
-                            m = await self._complete_async(
-                                aclient, self._recursive_prompt(ep.goal, prev, event)
-                            )
+                            m = await self._complete_async(aclient, self._recursive_prompt(ep.goal, prev, event))
                             mems.append(m)
                             prev = m
                 else:

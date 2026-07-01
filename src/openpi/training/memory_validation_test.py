@@ -20,9 +20,12 @@ def test_faithfulness_empty_memory_is_one():
 
 def test_prompt_builders_include_inputs():
     jp = mv.build_judge_prompt(goal="clean kitchen", history="1. wipe", memory="wiped once")
-    assert "clean kitchen" in jp and "wiped once" in jp and "1. wipe" in jp
+    assert "clean kitchen" in jp
+    assert "wiped once" in jp
+    assert "1. wipe" in jp
     rp = mv.build_reconstruction_prompt(goal="clean kitchen", memory="wiped once")
-    assert "clean kitchen" in rp and "wiped once" in rp
+    assert "clean kitchen" in rp
+    assert "wiped once" in rp
 
 
 def test_structural_score_clean_is_high():
@@ -52,3 +55,25 @@ def test_build_coherence_prompt_mentions_both_memories():
     assert "1 bowl placed" in p
     assert "2 bowls placed" in p
     assert "coherence" in p
+
+
+def test_faithfulness_matches_stemmed_variants():
+    # past-tense/plural memory forms should count as faithful vs imperative history (nltk Porter),
+    # not be penalized as hallucinations: placed<->place, bowls<->bowl.
+    assert mv.faithfulness("I placed three bowls in the cabinet", "place the bowl in the cabinet") >= 0.5
+
+
+def test_failure_invariance_rewards_unchanged_memory():
+    memories = ["I picked the apple", "I picked the apple", "I placed the apple"]
+    flags = [True, False, True]  # step 1 is a failed attempt; memory stayed identical
+    assert mv.failure_invariance_scores(memories, flags) == [1.0]
+
+
+def test_failure_invariance_penalizes_changed_memory():
+    memories = ["I picked the apple", "I failed and am retrying the apple", "I placed the apple"]
+    flags = [True, False, True]
+    assert mv.failure_invariance_scores(memories, flags)[0] < 1.0
+
+
+def test_failure_invariance_empty_when_all_success():
+    assert mv.failure_invariance_scores(["a", "b"], [True, True]) == []

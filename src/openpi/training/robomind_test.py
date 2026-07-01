@@ -100,34 +100,58 @@ def test_decode_resize_raw_array():
     assert out.dtype == np.uint8
 
 
-def test_read_fps_and_frames_from_h5(tmp_path):
+def _write_traj_h5(path, n_frames=5, *, fps=None):
+    """Build a fixture matching real RoboMIND h5_franka_1rgb layout: observations/rgb_images/camera_top
+    holds one flat uint8 720x1280x3 RGB buffer per frame (variable-length object dtype)."""
     import h5py
     import numpy as np
+    with h5py.File(path, "w") as f:
+        g = f.create_group("observations/rgb_images")
+        ds = g.create_dataset("camera_top", shape=(n_frames,), dtype=h5py.vlen_dtype(np.uint8))
+        for i in range(n_frames):
+            ds[i] = np.full(rm._RAW_H * rm._RAW_W * 3, i % 256, np.uint8)  # noqa: SLF001
+        if fps is not None:
+            f.attrs["fps"] = fps
+
+
+def test_read_fps_and_frames_from_h5(tmp_path):
+    import numpy as np
     p = tmp_path / "trajectory.hdf5"
-    with h5py.File(p, "w") as f:
-        g = f.create_group("rgb_images")
-        g.create_dataset("camera_top", data=np.zeros((5, 8, 8, 3), np.uint8))
-        f.attrs["fps"] = 10.0
+    _write_traj_h5(p, n_frames=5, fps=10.0)
     assert rm.read_fps(str(p), default=3.0) == 10.0
     frames = rm.read_camera_top_frames(str(p), [0, 4, 99], size=224)  # 99 clamps to last
     assert set(frames) == {0, 4, 99}
     assert frames[0].shape == (224, 224, 3)
+    assert frames[0].dtype == np.uint8
 
 
 def test_read_fps_default_when_missing(tmp_path):
-    import h5py
-    import numpy as np
     p = tmp_path / "t.hdf5"
-    with h5py.File(p, "w") as f:
-        f.create_group("rgb_images").create_dataset("camera_top", data=np.zeros((2, 4, 4, 3), np.uint8))
+    _write_traj_h5(p, n_frames=2, fps=None)
     assert rm.read_fps(str(p), default=7.5) == 7.5
+
+
+def test_decode_resize_raw_flat():
+    import numpy as np
+    flat = np.full(rm._RAW_H * rm._RAW_W * 3, 200, np.uint8)  # noqa: SLF001 -- real RoboMIND frame layout
+    out = rm._decode_resize(flat, size=224)  # noqa: SLF001
+    assert out.shape == (224, 224, 3)
+    assert out.dtype == np.uint8
+    assert int(out.mean()) == 200  # constant frame survives reshape+resize
 
 
 def test_decode_resize_raises_on_bad_jpeg():
     import numpy as np
-
+    # JPEG magic (FF D8) but corrupt payload -> imdecode returns None
     with pytest.raises(ValueError, match="cv2.imdecode failed"):
-        rm._decode_resize(np.array([0, 1, 2, 3, 4], dtype=np.uint8))  # noqa: SLF001 -- not a valid JPEG -> imdecode None
+        rm._decode_resize(np.array([0xFF, 0xD8, 0, 0, 0], dtype=np.uint8))  # noqa: SLF001
+
+
+def test_decode_resize_raises_on_unrecognized_1d():
+    import numpy as np
+    # no JPEG magic, wrong size for a raw frame -> explicit error, not a silent misread
+    with pytest.raises(ValueError, match="unrecognized"):
+        rm._decode_resize(np.array([0, 1, 2, 3, 4], dtype=np.uint8))  # noqa: SLF001
 
 
 def test_assemble_raises_on_misaligned_labels(tmp_path):
@@ -197,4 +221,5 @@ def test_assemble_cleans_cache_per_task_not_per_episode(tmp_path, monkeypatch):
     rm.assemble(records, labels, out_dir=tmp_path, cache_dir=tmp_path / "cache")
     # exactly two cleanups (one per distinct task), each ending in the task name -- not three (per episode)
     assert len(removed) == 2
-    assert removed[0].endswith("t1") and removed[1].endswith("t2")
+    assert removed[0].endswith("t1")
+    assert removed[1].endswith("t2")

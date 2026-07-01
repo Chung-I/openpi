@@ -113,15 +113,24 @@ def _task_of(record_id: str) -> str:
     return record_id.split("/")[1]
 
 
+# RoboMIND h5_franka_1rgb stores each camera_top frame as a flat uint8 HxWx3 RGB buffer (not JPEG).
+_RAW_H, _RAW_W = 720, 1280
+
+
 def _decode_resize(raw, size: int = 224) -> np.ndarray:
     import cv2
 
     arr = np.asarray(raw)
-    if arr.ndim == 1:  # encoded JPEG bytes
-        decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if decoded is None:
-            raise ValueError(f"cv2.imdecode failed on 1-D input of shape {arr.shape}")
-        arr = decoded[:, :, ::-1]  # BGR -> RGB
+    if arr.ndim == 1:
+        if arr.size >= 2 and arr[0] == 0xFF and arr[1] == 0xD8:  # JPEG magic -> encoded bytes
+            decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if decoded is None:
+                raise ValueError(f"cv2.imdecode failed on 1-D input of shape {arr.shape}")
+            arr = decoded[:, :, ::-1]  # BGR -> RGB
+        elif arr.size == _RAW_H * _RAW_W * 3:  # flat raw RGB frame
+            arr = arr.reshape(_RAW_H, _RAW_W, 3)
+        else:
+            raise ValueError(f"unrecognized 1-D frame buffer of size {arr.size} (not JPEG, not {_RAW_H}x{_RAW_W}x3)")
     return cv2.resize(arr, (size, size)).astype(np.uint8)
 
 
@@ -140,7 +149,7 @@ def read_camera_top_frames(h5_path: str, indices: list[int], size: int = 224) ->
 
     out = {}
     with h5py.File(h5_path, "r") as f:
-        ds = f["rgb_images/camera_top"]
+        ds = f["observations/rgb_images/camera_top"]
         last = len(ds) - 1
         for idx in indices:
             out[idx] = _decode_resize(ds[min(max(idx, 0), last)], size)

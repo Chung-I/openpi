@@ -140,6 +140,15 @@ def test_decode_resize_raw_flat():
     assert int(out.mean()) == 200  # constant frame survives reshape+resize
 
 
+def test_decode_resize_raw_flat_640x480():
+    import numpy as np
+    # some franka_3rgb tasks store camera_top as flat 480x640x3 raw RGB (921600 bytes), not JPEG
+    flat = np.full(480 * 640 * 3, 150, np.uint8)
+    out = rm._decode_resize(flat, size=224)  # noqa: SLF001
+    assert out.shape == (224, 224, 3)
+    assert int(out.mean()) == 150
+
+
 def test_decode_resize_raises_on_bad_jpeg():
     import numpy as np
     # JPEG magic (FF D8) but corrupt payload -> imdecode returns None

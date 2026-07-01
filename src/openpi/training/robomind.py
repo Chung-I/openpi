@@ -113,8 +113,10 @@ def _task_of(record_id: str) -> str:
     return record_id.split("/")[1]
 
 
-# RoboMIND h5_franka_1rgb stores each camera_top frame as a flat uint8 HxWx3 RGB buffer (not JPEG).
+# RoboMIND camera_top is JPEG in most tasks, but some store a flat uint8 HxWx3 raw RGB buffer at one
+# of these resolutions: 720x1280 (h5_franka_1rgb) or 480x640 (some h5_franka_3rgb tasks).
 _RAW_H, _RAW_W = 720, 1280
+_RAW_SHAPES = {_RAW_H * _RAW_W * 3: (_RAW_H, _RAW_W, 3), 480 * 640 * 3: (480, 640, 3)}
 
 
 def _decode_resize(raw, size: int = 224) -> np.ndarray:
@@ -127,10 +129,10 @@ def _decode_resize(raw, size: int = 224) -> np.ndarray:
             if decoded is None:
                 raise ValueError(f"cv2.imdecode failed on 1-D input of shape {arr.shape}")
             arr = decoded[:, :, ::-1]  # BGR -> RGB
-        elif arr.size == _RAW_H * _RAW_W * 3:  # flat raw RGB frame
-            arr = arr.reshape(_RAW_H, _RAW_W, 3)
+        elif arr.size in _RAW_SHAPES:  # flat raw RGB frame at a known resolution
+            arr = arr.reshape(_RAW_SHAPES[arr.size])
         else:
-            raise ValueError(f"unrecognized 1-D frame buffer of size {arr.size} (not JPEG, not {_RAW_H}x{_RAW_W}x3)")
+            raise ValueError(f"unrecognized 1-D frame buffer of size {arr.size} (not JPEG, not a known raw RGB size)")
     return cv2.resize(arr, (size, size)).astype(np.uint8)
 
 

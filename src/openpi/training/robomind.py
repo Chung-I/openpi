@@ -160,6 +160,7 @@ def assemble(
     records: list[dict], labels: list[dict], *, out_dir, cache_dir,
     fps_default: float = 10.0, sample_hz: float = 1.0, max_episodes: int | None = None,
 ) -> list[dict]:
+    import itertools
     import shutil
 
     from PIL import Image
@@ -170,8 +171,8 @@ def assemble(
     n = len(records) if max_episodes is None else min(max_episodes, len(records))
     if len(labels) < n:
         raise ValueError(f"labels ({len(labels)}) shorter than records ({n}) - records[i] must pair with labels[i]")
-    # Validate records<->labels pairing on the original index, then process grouped by task so each
-    # ~150GB task archive is fetched+extracted exactly once (episodes sharing a task reuse the extract).
+    # Validate records<->labels pairing on the original index, then process grouped by task: one
+    # streaming pass per ~400GB task archive extracts every requested episode's hdf5 at once.
     items = []
     for i in range(n):
         rec = records[i]
@@ -181,68 +182,127 @@ def assemble(
         items.append((rec, lab, _task_of(rec["id"])))
     items.sort(key=lambda it: it[2])  # stable -> contiguous task groups, original order within a group
     rows = []
-    prev_task = None
-    for rec, lab, task in items:
-        if prev_task is not None and task != prev_task:
-            shutil.rmtree(pathlib.Path(cache_dir) / prev_task, ignore_errors=True)
-        prev_task = task
+    for task, task_items in itertools.groupby(items, key=lambda it: it[2]):
+        grp = list(task_items)
+        timestamps = {rec["id"].split("/")[-2] for rec, _, _ in grp}
         try:
-            mems = lab["memories"]
-            h5 = fetch_task_hdf5(REPO, rec["id"], cache_dir)
-            fps = read_fps(h5, fps_default)
-            samples = build_samples(rec, mems, fps, sample_hz)
-            imgs = read_camera_top_frames(h5, sorted({s["frame"] for s in samples}))
-            stem = rec["id"].replace("/", "_")
-            ep_rows = []
-            for s in samples:
-                rel = f"frames/{stem}_{s['frame']}.jpg"
-                Image.fromarray(imgs[s["frame"]]).save(out_dir / rel)
-                s["image"] = rel
-                ep_rows.append(s)
-        except Exception as e:  # skip a bad episode, keep the run going
-            print(f"skip {rec['id']}: {type(e).__name__}: {e}", flush=True)
+            h5map = fetch_task_frames_h5(REPO, task, timestamps, cache_dir)
+        except Exception as e:  # a whole task archive failed to fetch -> skip it, keep the run going
+            print(f"skip task {task}: {type(e).__name__}: {e}", flush=True)
             continue
-        rows.extend(ep_rows)
-    if prev_task is not None:
-        shutil.rmtree(pathlib.Path(cache_dir) / prev_task, ignore_errors=True)
+        for rec, lab, _ in grp:
+            ts = rec["id"].split("/")[-2]
+            try:
+                h5 = h5map.get(ts)
+                if h5 is None:
+                    raise FileNotFoundError(f"trajectory.hdf5 not found for {rec['id']}")
+                fps = read_fps(h5, fps_default)
+                samples = build_samples(rec, lab["memories"], fps, sample_hz)
+                imgs = read_camera_top_frames(h5, sorted({s["frame"] for s in samples}))
+                stem = rec["id"].replace("/", "_")
+                ep_rows = []
+                for s in samples:
+                    rel = f"frames/{stem}_{s['frame']}.jpg"
+                    Image.fromarray(imgs[s["frame"]]).save(out_dir / rel)
+                    s["image"] = rel
+                    ep_rows.append(s)
+            except Exception as e:  # skip a bad episode, keep the run going
+                print(f"skip {rec['id']}: {type(e).__name__}: {e}", flush=True)
+                continue
+            rows.extend(ep_rows)
+        shutil.rmtree(pathlib.Path(cache_dir) / task, ignore_errors=True)
     (out_dir / "manifest.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     print(f"Wrote {len(rows)} HL samples -> {out_dir / 'manifest.jsonl'}")
     return rows
 
 
-def fetch_task_hdf5(repo: str, record_id: str, cache_dir: str) -> str:
-    """Download the record's task-tar parts, reassemble+extract into cache_dir/<task>, and return
-    the episode's trajectory.hdf5. Caches per task (guarded by a .done sentinel); the caller deletes
-    cache_dir/<task> when done."""
-    import glob
-    import shutil
-    import tarfile
+class _ConcatReader:
+    """Read the ordered .tar.gz.part-* files as one continuous byte stream. The parts are a plain
+    binary split of a single gzip stream, so concatenating their bytes reconstructs it -- letting
+    tarfile stream the ~400GB archive without ever writing a reassembled copy to disk."""
 
+    def __init__(self, paths):
+        self._paths = list(paths)
+        self._i = 0
+        self._f = open(self._paths[0], "rb") if self._paths else None  # noqa: SIM115
+
+    def read(self, size: int = -1) -> bytes:
+        out = bytearray()
+        while self._f is not None and size != 0:
+            chunk = self._f.read(size if size and size > 0 else -1)
+            if chunk:
+                out += chunk
+                if size and size > 0:
+                    size -= len(chunk)
+            else:  # current part exhausted -> advance to the next one
+                self._f.close()
+                self._i += 1
+                self._f = open(self._paths[self._i], "rb") if self._i < len(self._paths) else None  # noqa: SIM115
+        return bytes(out)
+
+    def close(self) -> None:
+        if self._f is not None:
+            self._f.close()
+            self._f = None
+
+
+def _download_task_parts(repo: str, task: str) -> list[str]:
     import huggingface_hub
 
-    task = _task_of(record_id)
+    files = huggingface_hub.list_repo_files(repo, repo_type="dataset")
+    parts = sorted(f for f in files if f"/{task}.tar.gz.part-" in f)
+    if not parts:
+        raise FileNotFoundError(f"no tar parts for task {task}")
+    return [huggingface_hub.hf_hub_download(repo, repo_type="dataset", filename=p) for p in parts]
+
+
+def fetch_task_frames_h5(repo: str, task: str, timestamps, cache_dir, *, part_paths=None) -> dict[str, str]:
+    """Stream the task's tar parts once and extract ONLY the trajectory.hdf5 members whose episode
+    timestamp is in `timestamps` -- instead of reassembling + extracting the whole ~400GB archive to
+    read a few frames. Returns {timestamp: local_hdf5_path}. Idempotent: already-extracted timestamps
+    are reused, so a resumed run only streams for the ones still missing. Pass `part_paths` to bypass
+    the HF download (used by tests). The caller deletes cache_dir/<task> when done with the task."""
+    import glob
+    import tarfile
+
     dest = pathlib.Path(cache_dir) / task
-    done = dest / ".done"
-    if not done.exists():
-        if dest.exists():
-            shutil.rmtree(dest, ignore_errors=True)  # clean a stale partial extract
-        files = huggingface_hub.list_repo_files(repo, repo_type="dataset")
-        parts = sorted(f for f in files if f"/{task}.tar.gz.part-" in f)
-        if not parts:
-            raise FileNotFoundError(f"no tar parts for task {task}")
-        dest.mkdir(parents=True, exist_ok=True)
-        local = [huggingface_hub.hf_hub_download(repo, repo_type="dataset", filename=p) for p in parts]
-        tar_path = dest / f"{task}.tar.gz"
-        with open(tar_path, "wb") as out:
-            for lp in local:
-                with open(lp, "rb") as pf:
-                    shutil.copyfileobj(pf, out)
-        with tarfile.open(tar_path, "r:gz") as tf:
-            tf.extractall(dest)
-        tar_path.unlink()
-        done.touch()
-    ts = record_id.split("/")[-2]
-    hits = glob.glob(f"{dest}/**/{ts}/data/trajectory.hdf5", recursive=True)
-    if not hits:
-        raise FileNotFoundError(f"trajectory.hdf5 not found for {record_id}")
-    return hits[0]
+
+    def _find(ts):
+        hits = glob.glob(f"{dest}/**/{ts}/data/trajectory.hdf5", recursive=True)
+        return hits[0] if hits else None
+
+    result = {}
+    wanted = set()
+    for ts in timestamps:
+        hit = _find(ts)
+        if hit:
+            result[ts] = hit
+        else:
+            wanted.add(ts)
+    if not wanted:
+        return result
+
+    if part_paths is None:
+        part_paths = _download_task_parts(repo, task)
+    dest.mkdir(parents=True, exist_ok=True)
+    reader = _ConcatReader(part_paths)
+    try:
+        with tarfile.open(fileobj=reader, mode="r|gz") as tf:  # streaming, no seek/reassembly
+            for m in tf:
+                if not m.name.endswith("/data/trajectory.hdf5"):
+                    continue
+                ts = m.name.split("/")[-3]
+                if ts in wanted:
+                    tf.extract(m, dest)  # trusted RoboMIND archive
+                    wanted.discard(ts)
+                    if not wanted:  # got everything this task needs -> stop decompressing early
+                        break
+    finally:
+        reader.close()
+
+    for ts in timestamps:
+        if ts not in result:
+            hit = _find(ts)
+            if hit:
+                result[ts] = hit
+    return result

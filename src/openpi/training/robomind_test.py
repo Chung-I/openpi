@@ -180,7 +180,8 @@ def test_assemble_writes_manifest_and_frames(tmp_path, monkeypatch):
     records = [{"id": "h5_franka_1rgb/t/success_episodes/train/1/data", "goal": "g",
                 "subtasks": ["a", "b"], "frame_ranges": [[0, 10], [10, 20]], "success_flags": [True, True]}]
     labels = [{"episode_id": "0", "memories": ["m1", "m2"]}]
-    monkeypatch.setattr(rm, "fetch_task_hdf5", lambda repo, rid, cache: "fake.hdf5")
+    monkeypatch.setattr(rm, "fetch_task_frames_h5",
+                        lambda repo, task, timestamps, cache, **kw: dict.fromkeys(timestamps, "fake.hdf5"))
     monkeypatch.setattr(rm, "read_fps", lambda h5, default: 10.0)
     monkeypatch.setattr(rm, "read_camera_top_frames",
                         lambda h5, idxs, size=224: {i: np.zeros((size, size, 3), np.uint8) for i in idxs})
@@ -214,7 +215,8 @@ def test_assemble_cleans_cache_per_task_not_per_episode(tmp_path, monkeypatch):
     labels = [{"episode_id": str(i), "memories": ["m1"]} for i in range(3)]
     removed = []
     monkeypatch.setattr(shutil, "rmtree", lambda p, **kw: removed.append(str(p)))
-    monkeypatch.setattr(rm, "fetch_task_hdf5", lambda repo, rid, cache: f"fake_{rm._task_of(rid)}.hdf5")  # noqa: SLF001
+    monkeypatch.setattr(rm, "fetch_task_frames_h5",
+                        lambda repo, task, timestamps, cache, **kw: dict.fromkeys(timestamps, f"fake_{task}.hdf5"))
     monkeypatch.setattr(rm, "read_fps", lambda h5, default: 10.0)
     monkeypatch.setattr(rm, "read_camera_top_frames",
                         lambda h5, idxs, size=224: {i: np.zeros((size, size, 3), np.uint8) for i in idxs})
@@ -223,3 +225,53 @@ def test_assemble_cleans_cache_per_task_not_per_episode(tmp_path, monkeypatch):
     assert len(removed) == 2
     assert removed[0].endswith("t1")
     assert removed[1].endswith("t2")
+
+
+def test_concat_reader_reads_parts_as_one_stream(tmp_path):
+    # a byte blob split across 3 files must read back identically to the concatenation, regardless
+    # of the requested chunk size (parts split the gzip stream at arbitrary byte offsets)
+    blob = bytes(range(256)) * 500  # 128000 bytes
+    paths = []
+    for i, off in enumerate(range(0, len(blob), 5000)):
+        p = tmp_path / f"part-{i:02d}"
+        p.write_bytes(blob[off:off + 5000])
+        paths.append(str(p))
+    r = rm._ConcatReader(paths)  # noqa: SLF001
+    got = b"".join(iter(lambda: r.read(777), b""))  # odd chunk size crosses part boundaries
+    r.close()
+    assert got == blob
+
+
+def test_fetch_task_frames_h5_extracts_only_wanted(tmp_path):
+    import io
+    import pathlib
+    import tarfile
+
+    # build a real tar.gz holding two episodes' trajectory.hdf5, split into 2 byte-parts like RoboMIND
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w:gz") as tf:
+        for ts in ("111", "222"):
+            data = f"h5-{ts}".encode()
+            info = tarfile.TarInfo(f"mytask/success_episodes/train/{ts}/data/trajectory.hdf5")
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    payload = raw.getvalue()
+    mid = len(payload) // 2
+    p0 = tmp_path / "mytask.tar.gz.part-aa"
+    p0.write_bytes(payload[:mid])
+    p1 = tmp_path / "mytask.tar.gz.part-ab"
+    p1.write_bytes(payload[mid:])
+    cache = tmp_path / "cache"
+
+    # only "111" requested -> only its hdf5 is extracted, "222" is skipped
+    out = rm.fetch_task_frames_h5("repo", "mytask", {"111"}, cache, part_paths=[str(p0), str(p1)])
+    assert set(out) == {"111"}
+    assert pathlib.Path(out["111"]).read_bytes() == b"h5-111"
+    import glob as _glob
+    assert not _glob.glob(f"{cache}/**/222/data/trajectory.hdf5", recursive=True)
+
+    # a later call for "222" extracts it; the already-present "111" is reused without re-streaming
+    out2 = rm.fetch_task_frames_h5("repo", "mytask", {"111", "222"}, cache,
+                                   part_paths=[str(p0), str(p1)])
+    assert set(out2) == {"111", "222"}
+    assert pathlib.Path(out2["222"]).read_bytes() == b"h5-222"

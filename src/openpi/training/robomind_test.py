@@ -281,6 +281,19 @@ def test_member_of():
     assert rm._member_of(rid) == "bread_in_basket/success_episodes/train/1016_161244/data/trajectory.hdf5"  # noqa: SLF001
 
 
+def test_download_task_parts_preserves_order(monkeypatch):
+    import huggingface_hub
+    # unsorted repo listing across embodiments; only mytask's parts, returned in part order
+    monkeypatch.setattr(huggingface_hub, "list_repo_files", lambda repo, repo_type: [
+        "b/h5x/mytask.tar.gz.part-ab", "b/h5x/other.tar.gz.part-aa", "b/h5x/mytask.tar.gz.part-aa",
+        "b/h5x/mytask.tar.gz.part-ac",
+    ])
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda repo, repo_type, filename: f"/cache/{filename}")
+    out = rm._download_task_parts("repo", "mytask", max_workers=4)  # noqa: SLF001
+    assert out == ["/cache/b/h5x/mytask.tar.gz.part-aa", "/cache/b/h5x/mytask.tar.gz.part-ab",
+                   "/cache/b/h5x/mytask.tar.gz.part-ac"]
+
+
 def test_delete_part_blobs(tmp_path):
     # HF cache layout: a snapshot symlink pointing at a content-addressed blob; both must be removed
     blobs = tmp_path / "blobs"

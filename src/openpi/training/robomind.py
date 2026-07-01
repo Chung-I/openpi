@@ -219,14 +219,22 @@ def assemble(
     return rows
 
 
-def _download_task_parts(repo: str, task: str) -> list[str]:
+def _download_task_parts(repo: str, task: str, *, max_workers: int = 8) -> list[str]:
+    import concurrent.futures
+
     import huggingface_hub
 
     files = huggingface_hub.list_repo_files(repo, repo_type="dataset")
     parts = sorted(f for f in files if f"/{task}.tar.gz.part-" in f)
     if not parts:
         raise FileNotFoundError(f"no tar parts for task {task}")
-    return [huggingface_hub.hf_hub_download(repo, repo_type="dataset", filename=p) for p in parts]
+    # Parallel downloads: a task archive is up to ~40GB of 10GB parts; single-stream (~100MB/s) makes
+    # a 2.4TB subset take ~10h, but 8 concurrent streams sustain ~700MB/s. hf_hub_download is thread-safe.
+    def _dl(p):
+        return huggingface_hub.hf_hub_download(repo, repo_type="dataset", filename=p)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        return list(ex.map(_dl, parts))  # ex.map preserves part order
 
 
 def _delete_part_blobs(part_paths: list[str]) -> None:

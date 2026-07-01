@@ -10,6 +10,8 @@ import json
 import pathlib
 import re
 
+import numpy as np
+
 from openpi.training.memory_labels import Episode
 
 REPO = "x-humanoid-robomind/RoboMIND"
@@ -105,3 +107,69 @@ def build_samples(
         else:
             samples.append(_mk(eid, goal, idx, m_prev, flags[idx], e, False, l_cur, m_prev))  # noqa: FBT003
     return samples
+
+
+def _task_of(record_id: str) -> str:
+    return record_id.split("/")[1]
+
+
+def _decode_resize(raw, size: int = 224):
+    import cv2
+
+    arr = np.asarray(raw)
+    if arr.ndim == 1:  # encoded JPEG bytes
+        arr = cv2.imdecode(arr, cv2.IMREAD_COLOR)[:, :, ::-1]  # BGR -> RGB
+    return cv2.resize(arr, (size, size)).astype(np.uint8)
+
+
+def read_fps(h5_path: str, default: float) -> float:
+    import h5py
+
+    with h5py.File(h5_path, "r") as f:
+        for key in ("fps", "control_freq", "frequency", "hz"):
+            if key in f.attrs:
+                return float(f.attrs[key])
+    return float(default)
+
+
+def read_camera_top_frames(h5_path: str, indices: list[int], size: int = 224) -> dict:
+    import h5py
+
+    out = {}
+    with h5py.File(h5_path, "r") as f:
+        ds = f["rgb_images/camera_top"]
+        last = len(ds) - 1
+        for idx in indices:
+            out[idx] = _decode_resize(ds[min(max(idx, 0), last)], size)
+    return out
+
+
+def fetch_task_hdf5(repo: str, record_id: str, cache_dir: str) -> str:
+    """Download the record's task-tar parts, reassemble+extract into cache_dir/<task>, and return
+    the episode's trajectory.hdf5. Caches per task; the caller deletes cache_dir/<task> when done."""
+    import glob
+    import tarfile
+
+    import huggingface_hub
+
+    task = _task_of(record_id)
+    dest = pathlib.Path(cache_dir) / task
+    if not dest.exists():
+        files = huggingface_hub.list_repo_files(repo, repo_type="dataset")
+        parts = sorted(f for f in files if f"/{task}.tar.gz.part-" in f)
+        if not parts:
+            raise FileNotFoundError(f"no tar parts for task {task}")
+        dest.mkdir(parents=True, exist_ok=True)
+        local = [huggingface_hub.hf_hub_download(repo, repo_type="dataset", filename=p) for p in parts]
+        tar_path = dest / f"{task}.tar.gz"
+        with open(tar_path, "wb") as out:
+            for lp in local:
+                out.write(pathlib.Path(lp).read_bytes())
+        with tarfile.open(tar_path, "r:gz") as tf:
+            tf.extractall(dest)
+        tar_path.unlink()
+    ts = record_id.split("/")[-2]
+    hits = glob.glob(f"{dest}/**/{ts}/data/trajectory.hdf5", recursive=True)
+    if not hits:
+        raise FileNotFoundError(f"trajectory.hdf5 not found for {record_id}")
+    return hits[0]

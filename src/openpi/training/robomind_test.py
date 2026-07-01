@@ -87,3 +87,37 @@ def test_failed_subtask_boundary_is_no_update():
 def test_memories_length_mismatch_raises():
     with pytest.raises(ValueError, match="memories"):
         rm.build_samples(_rec(), ["m1", "m2"], fps=10)
+
+
+def test_task_of():
+    assert rm._task_of("h5_franka_1rgb/bread_in_basket/success_episodes/train/1016_161244/data") == "bread_in_basket"  # noqa: SLF001
+
+
+def test_decode_resize_raw_array():
+    import numpy as np
+    out = rm._decode_resize(np.zeros((10, 12, 3), np.uint8), size=224)  # noqa: SLF001
+    assert out.shape == (224, 224, 3)
+    assert out.dtype == np.uint8
+
+
+def test_read_fps_and_frames_from_h5(tmp_path):
+    import h5py
+    import numpy as np
+    p = tmp_path / "trajectory.hdf5"
+    with h5py.File(p, "w") as f:
+        g = f.create_group("rgb_images")
+        g.create_dataset("camera_top", data=np.zeros((5, 8, 8, 3), np.uint8))
+        f.attrs["fps"] = 10.0
+    assert rm.read_fps(str(p), default=3.0) == 10.0
+    frames = rm.read_camera_top_frames(str(p), [0, 4, 99], size=224)  # 99 clamps to last
+    assert set(frames) == {0, 4, 99}
+    assert frames[0].shape == (224, 224, 3)
+
+
+def test_read_fps_default_when_missing(tmp_path):
+    import h5py
+    import numpy as np
+    p = tmp_path / "t.hdf5"
+    with h5py.File(p, "w") as f:
+        f.create_group("rgb_images").create_dataset("camera_top", data=np.zeros((2, 4, 4, 3), np.uint8))
+    assert rm.read_fps(str(p), default=7.5) == 7.5

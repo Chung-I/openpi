@@ -161,15 +161,24 @@ def assemble(
     n = len(records) if max_episodes is None else min(max_episodes, len(records))
     if len(labels) < n:
         raise ValueError(f"labels ({len(labels)}) shorter than records ({n}) - records[i] must pair with labels[i]")
-    rows = []
+    # Validate records<->labels pairing on the original index, then process grouped by task so each
+    # ~150GB task archive is fetched+extracted exactly once (episodes sharing a task reuse the extract).
+    items = []
     for i in range(n):
         rec = records[i]
         lab = labels[i]
         if lab.get("episode_id") not in (None, str(i)):
             raise ValueError(f"label {i} episode_id={lab.get('episode_id')!r} != str({i}); records/labels misaligned")
+        items.append((rec, lab, _task_of(rec["id"])))
+    items.sort(key=lambda it: it[2])  # stable -> contiguous task groups, original order within a group
+    rows = []
+    prev_task = None
+    for rec, lab, task in items:
+        if prev_task is not None and task != prev_task:
+            shutil.rmtree(pathlib.Path(cache_dir) / prev_task, ignore_errors=True)
+        prev_task = task
         try:
             mems = lab["memories"]
-            task = _task_of(rec["id"])
             h5 = fetch_task_hdf5(REPO, rec["id"], cache_dir)
             fps = read_fps(h5, fps_default)
             samples = build_samples(rec, mems, fps, sample_hz)
@@ -185,7 +194,8 @@ def assemble(
             print(f"skip {rec['id']}: {type(e).__name__}: {e}", flush=True)
             continue
         rows.extend(ep_rows)
-        shutil.rmtree(pathlib.Path(cache_dir) / task, ignore_errors=True)
+    if prev_task is not None:
+        shutil.rmtree(pathlib.Path(cache_dir) / prev_task, ignore_errors=True)
     (out_dir / "manifest.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     print(f"Wrote {len(rows)} HL samples -> {out_dir / 'manifest.jsonl'}")
     return rows

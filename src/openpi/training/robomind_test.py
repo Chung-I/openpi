@@ -169,3 +169,32 @@ def test_assemble_writes_manifest_and_frames(tmp_path, monkeypatch):
     assert (tmp_path / first["image"]).exists()
     # a boundary update sample is present with the advanced target
     assert any(r["update"] and r["target_subtask"] == "b" and r["target_memory"] == "m1" for r in rows)
+
+
+def test_assemble_cleans_cache_per_task_not_per_episode(tmp_path, monkeypatch):
+    import shutil
+
+    import numpy as np
+
+    # two episodes share task "t1", one is "t2"; interleaved on purpose so only task-grouping (not
+    # input order) yields per-task cleanup. rmtree must fire once per distinct task, not per episode,
+    # or same-task episodes would re-extract the ~150GB archive each time.
+    records = [
+        {"id": "h5_franka_1rgb/t1/success_episodes/train/1/data", "goal": "g",
+         "subtasks": ["a"], "frame_ranges": [[0, 5]], "success_flags": [True]},
+        {"id": "h5_franka_1rgb/t2/success_episodes/train/2/data", "goal": "g",
+         "subtasks": ["a"], "frame_ranges": [[0, 5]], "success_flags": [True]},
+        {"id": "h5_franka_1rgb/t1/success_episodes/train/3/data", "goal": "g",
+         "subtasks": ["a"], "frame_ranges": [[0, 5]], "success_flags": [True]},
+    ]
+    labels = [{"episode_id": str(i), "memories": ["m1"]} for i in range(3)]
+    removed = []
+    monkeypatch.setattr(shutil, "rmtree", lambda p, **kw: removed.append(str(p)))
+    monkeypatch.setattr(rm, "fetch_task_hdf5", lambda repo, rid, cache: f"fake_{rm._task_of(rid)}.hdf5")  # noqa: SLF001
+    monkeypatch.setattr(rm, "read_fps", lambda h5, default: 10.0)
+    monkeypatch.setattr(rm, "read_camera_top_frames",
+                        lambda h5, idxs, size=224: {i: np.zeros((size, size, 3), np.uint8) for i in idxs})
+    rm.assemble(records, labels, out_dir=tmp_path, cache_dir=tmp_path / "cache")
+    # exactly two cleanups (one per distinct task), each ending in the task name -- not three (per episode)
+    assert len(removed) == 2
+    assert removed[0].endswith("t1") and removed[1].endswith("t2")

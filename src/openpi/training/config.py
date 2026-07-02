@@ -409,7 +409,7 @@ class RLDSDroidDataConfig(DataConfigFactory):
             "actions": "actions",
             "prompt": "prompt",
         }
-        if model_config.model_type == _model.ModelType.PI0_MEM and getattr(model_config, "num_video_frames", 1) > 1:
+        if model_config.model_type == _model.ModelType.PI0_MEM and getattr(model_config, "num_video_frames", 1) >= 1:
             repack_map.update({
                 "observation/video_exterior_image_1_left": "observation/video_image",
                 "observation/video_wrist_image_left": "observation/video_wrist_image",
@@ -1003,6 +1003,21 @@ _CONFIGS = [
         save_interval=100,
         overwrite=True,
         exp_name="pi0_mem_debug",
+        num_train_steps=10,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="pi0_mem_k1_debug",
+        data=FakeDataConfig(),
+        batch_size=2,
+        model=pi0_mem_config.Pi0MEMConfig(
+            paligemma_variant="dummy",
+            action_expert_variant="dummy",
+            num_video_frames=1,
+        ),
+        save_interval=100,
+        overwrite=True,
+        exp_name="pi0_mem_k1_debug",
         num_train_steps=10,
         wandb_enabled=False,
     ),

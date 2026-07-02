@@ -217,7 +217,7 @@ class DroidRldsDataset:
 
             dataset = dataset.traj_map(chunk_actions, num_parallel_calls)
 
-            if num_video_frames > 1:
+            if num_video_frames >= 1:
                 def gather_history(traj):
                     traj_len = tf.shape(traj["observation"]["image"])[0]
                     idx = _video_window_indices(traj_len, num_video_frames, video_stride_frames)  # [T,K]
@@ -254,7 +254,7 @@ class DroidRldsDataset:
                 traj["observation"]["wrist_image"] = tf.io.decode_image(
                     traj["observation"]["wrist_image"], expand_animations=False, dtype=tf.uint8
                 )
-                if num_video_frames > 1:
+                if num_video_frames >= 1:
                     def _decode_k(frames):  # frames: [K] encoded -> [K,h,w,3]
                         return tf.map_fn(
                             lambda x: tf.io.decode_image(x, expand_animations=False, dtype=tf.uint8),

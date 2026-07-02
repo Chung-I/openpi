@@ -113,16 +113,43 @@ def _task_of(record_id: str) -> str:
     return record_id.split("/")[1]
 
 
+# RoboMIND camera_top is JPEG in most tasks, but some store a flat uint8 HxWx3 raw RGB buffer at one
+# of these resolutions: 720x1280 (h5_franka_1rgb) or 480x640 (some h5_franka_3rgb tasks).
+_RAW_H, _RAW_W = 720, 1280
+_RAW_SHAPES = {_RAW_H * _RAW_W * 3: (_RAW_H, _RAW_W, 3), 480 * 640 * 3: (480, 640, 3)}
+
+
+def _resize_with_pad(arr: np.ndarray, size: int) -> np.ndarray:
+    """Aspect-preserving resize to size x size, black-padded (letterbox). Matches openpi's
+    `image_tools.resize_with_pad` math so RoboMIND frames get the SAME preprocessing as DROID:
+    stretching to a square (cv2.resize(size,size)) would distort geometry vs the pretrained SigLIP."""
+    import cv2
+
+    h, w = arr.shape[:2]
+    ratio = max(w / size, h / size)
+    rh, rw = int(h / ratio), int(w / ratio)
+    resized = cv2.resize(arr, (rw, rh), interpolation=cv2.INTER_LINEAR)
+    ph0, rem_h = divmod(size - rh, 2)
+    pw0, rem_w = divmod(size - rw, 2)
+    padded = np.pad(resized, ((ph0, ph0 + rem_h), (pw0, pw0 + rem_w), (0, 0)), constant_values=0)
+    return padded.astype(np.uint8)
+
+
 def _decode_resize(raw, size: int = 224) -> np.ndarray:
     import cv2
 
     arr = np.asarray(raw)
-    if arr.ndim == 1:  # encoded JPEG bytes
-        decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if decoded is None:
-            raise ValueError(f"cv2.imdecode failed on 1-D input of shape {arr.shape}")
-        arr = decoded[:, :, ::-1]  # BGR -> RGB
-    return cv2.resize(arr, (size, size)).astype(np.uint8)
+    if arr.ndim == 1:
+        if arr.size >= 2 and arr[0] == 0xFF and arr[1] == 0xD8:  # JPEG magic -> encoded bytes
+            decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if decoded is None:
+                raise ValueError(f"cv2.imdecode failed on 1-D input of shape {arr.shape}")
+            arr = decoded[:, :, ::-1]  # BGR -> RGB
+        elif arr.size in _RAW_SHAPES:  # flat raw RGB frame at a known resolution
+            arr = arr.reshape(_RAW_SHAPES[arr.size])
+        else:
+            raise ValueError(f"unrecognized 1-D frame buffer of size {arr.size} (not JPEG, not a known raw RGB size)")
+    return _resize_with_pad(arr, size)
 
 
 def read_fps(h5_path: str, default: float) -> float:
@@ -140,7 +167,7 @@ def read_camera_top_frames(h5_path: str, indices: list[int], size: int = 224) ->
 
     out = {}
     with h5py.File(h5_path, "r") as f:
-        ds = f["rgb_images/camera_top"]
+        ds = f["observations/rgb_images/camera_top"]
         last = len(ds) - 1
         for idx in indices:
             out[idx] = _decode_resize(ds[min(max(idx, 0), last)], size)
@@ -150,7 +177,9 @@ def read_camera_top_frames(h5_path: str, indices: list[int], size: int = 224) ->
 def assemble(
     records: list[dict], labels: list[dict], *, out_dir, cache_dir,
     fps_default: float = 10.0, sample_hz: float = 1.0, max_episodes: int | None = None,
+    cleanup_parts: bool = False,
 ) -> list[dict]:
+    import itertools
     import shutil
 
     from PIL import Image
@@ -161,69 +190,153 @@ def assemble(
     n = len(records) if max_episodes is None else min(max_episodes, len(records))
     if len(labels) < n:
         raise ValueError(f"labels ({len(labels)}) shorter than records ({n}) - records[i] must pair with labels[i]")
-    rows = []
+    # Validate records<->labels pairing on the original index, then process grouped by task: one
+    # streaming pass per ~400GB task archive extracts every requested episode's hdf5 at once.
+    items = []
     for i in range(n):
         rec = records[i]
         lab = labels[i]
         if lab.get("episode_id") not in (None, str(i)):
             raise ValueError(f"label {i} episode_id={lab.get('episode_id')!r} != str({i}); records/labels misaligned")
+        items.append((rec, lab, _task_of(rec["id"])))
+    items.sort(key=lambda it: it[2])  # stable -> contiguous task groups, original order within a group
+    rows = []
+    for task, task_items in itertools.groupby(items, key=lambda it: it[2]):
+        grp = list(task_items)
+        record_ids = [rec["id"] for rec, _, _ in grp]
         try:
-            mems = lab["memories"]
-            task = _task_of(rec["id"])
-            h5 = fetch_task_hdf5(REPO, rec["id"], cache_dir)
-            fps = read_fps(h5, fps_default)
-            samples = build_samples(rec, mems, fps, sample_hz)
-            imgs = read_camera_top_frames(h5, sorted({s["frame"] for s in samples}))
-            stem = rec["id"].replace("/", "_")
-            ep_rows = []
-            for s in samples:
-                rel = f"frames/{stem}_{s['frame']}.jpg"
-                Image.fromarray(imgs[s["frame"]]).save(out_dir / rel)
-                s["image"] = rel
-                ep_rows.append(s)
-        except Exception as e:  # skip a bad episode, keep the run going
-            print(f"skip {rec['id']}: {type(e).__name__}: {e}", flush=True)
+            h5map = fetch_task_frames_h5(REPO, task, record_ids, cache_dir, cleanup_parts=cleanup_parts)
+        except Exception as e:  # a whole task archive failed to fetch -> skip it, keep the run going
+            print(f"skip task {task}: {type(e).__name__}: {e}", flush=True)
             continue
-        rows.extend(ep_rows)
+        for rec, lab, _ in grp:
+            ts = rec["id"].split("/")[-2]
+            try:
+                h5 = h5map.get(ts)
+                if h5 is None:
+                    raise FileNotFoundError(f"trajectory.hdf5 not found for {rec['id']}")
+                fps = read_fps(h5, fps_default)
+                samples = build_samples(rec, lab["memories"], fps, sample_hz)
+                imgs = read_camera_top_frames(h5, sorted({s["frame"] for s in samples}))
+                stem = rec["id"].replace("/", "_")
+                ep_rows = []
+                for s in samples:
+                    rel = f"frames/{stem}_{s['frame']}.jpg"
+                    Image.fromarray(imgs[s["frame"]]).save(out_dir / rel)
+                    s["image"] = rel
+                    ep_rows.append(s)
+            except Exception as e:  # skip a bad episode, keep the run going
+                print(f"skip {rec['id']}: {type(e).__name__}: {e}", flush=True)
+                continue
+            rows.extend(ep_rows)
         shutil.rmtree(pathlib.Path(cache_dir) / task, ignore_errors=True)
     (out_dir / "manifest.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     print(f"Wrote {len(rows)} HL samples -> {out_dir / 'manifest.jsonl'}")
     return rows
 
 
-def fetch_task_hdf5(repo: str, record_id: str, cache_dir: str) -> str:
-    """Download the record's task-tar parts, reassemble+extract into cache_dir/<task>, and return
-    the episode's trajectory.hdf5. Caches per task (guarded by a .done sentinel); the caller deletes
-    cache_dir/<task> when done."""
-    import glob
-    import shutil
-    import tarfile
+def _download_task_parts(repo: str, task: str, *, max_workers: int = 8) -> list[str]:
+    import concurrent.futures
 
     import huggingface_hub
 
-    task = _task_of(record_id)
+    files = huggingface_hub.list_repo_files(repo, repo_type="dataset")
+    parts = sorted(f for f in files if f"/{task}.tar.gz.part-" in f)
+    if not parts:
+        raise FileNotFoundError(f"no tar parts for task {task}")
+    # Parallel downloads: a task archive is up to ~40GB of 10GB parts; single-stream (~100MB/s) makes
+    # a 2.4TB subset take ~10h, but 8 concurrent streams sustain ~700MB/s. hf_hub_download is thread-safe.
+    def _dl(p):
+        return huggingface_hub.hf_hub_download(repo, repo_type="dataset", filename=p)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        return list(ex.map(_dl, parts))  # ex.map preserves part order
+
+
+def _delete_part_blobs(part_paths: list[str]) -> None:
+    """Delete downloaded tar-part files (the HF snapshot symlink + the blob it points at) to reclaim
+    disk. A ~400GB task archive otherwise lingers in the HF cache after extraction; deleting per task
+    keeps peak usage to one task's parts, which matters under a storage quota (e.g. 2.4TB franka_3rgb)."""
+    import contextlib
+    import os
+
+    for p in part_paths:
+        blob = os.path.realpath(p)
+        for target in (blob, p):
+            with contextlib.suppress(OSError):
+                os.remove(target)
+
+
+def _member_of(record_id: str) -> str:
+    """Archive member for a record: drop the embodiment prefix and append trajectory.hdf5.
+    `h5_franka_1rgb/bread_in_basket/success_episodes/train/1016_161244/data`
+    -> `bread_in_basket/success_episodes/train/1016_161244/data/trajectory.hdf5`."""
+    return "/".join(record_id.split("/")[1:]) + "/trajectory.hdf5"
+
+
+def _stream_extract_members(part_paths: list[str], members: list[str], dest: pathlib.Path) -> None:
+    """`cat parts | tar -xz --occurrence=1 <exact members>` -- the parts are a binary split of one
+    gzip stream, so cat reconstructs it and GNU tar decompresses + extracts only the named members at
+    C speed (no reassembled copy, low RAM). Exact names (no wildcards) are matched identically across
+    tar versions -- `--wildcards '*/...'` does NOT span slashes on GNU tar 1.34. `--occurrence=1` lets
+    tar stop reading once every named member has been found. tar exits nonzero when a member is absent;
+    that is fine here -- the caller resolves what was actually extracted by globbing."""
+    import subprocess
+
+    cat = subprocess.Popen(["cat", *part_paths], stdout=subprocess.PIPE)
+    try:
+        tar = subprocess.Popen(
+            ["tar", "-xz", "--occurrence=1", "-C", str(dest), *members],
+            stdin=cat.stdout,
+        )
+        cat.stdout.close()  # let cat receive SIGPIPE if tar exits early
+        tar.wait()
+    finally:
+        cat.wait()
+
+
+def fetch_task_frames_h5(
+    repo: str, task: str, record_ids, cache_dir, *, part_paths=None, cleanup_parts: bool = False
+) -> dict[str, str]:
+    """Stream the task's tar parts once and extract ONLY the trajectory.hdf5 members for `record_ids`
+    -- instead of reassembling + extracting the whole ~400GB archive to read a few frames. Returns
+    {timestamp: local_hdf5_path}. Idempotent: already-extracted timestamps are reused, so a resumed
+    run only streams for the ones still missing. Pass `part_paths` to bypass the HF download (used by
+    tests). With `cleanup_parts=True`, the downloaded parts are deleted after extraction so peak disk
+    stays at one task's archive (needed for large subsets under a storage quota). The caller deletes
+    cache_dir/<task> when done with the task."""
+    import glob
+
     dest = pathlib.Path(cache_dir) / task
-    done = dest / ".done"
-    if not done.exists():
-        if dest.exists():
-            shutil.rmtree(dest, ignore_errors=True)  # clean a stale partial extract
-        files = huggingface_hub.list_repo_files(repo, repo_type="dataset")
-        parts = sorted(f for f in files if f"/{task}.tar.gz.part-" in f)
-        if not parts:
-            raise FileNotFoundError(f"no tar parts for task {task}")
-        dest.mkdir(parents=True, exist_ok=True)
-        local = [huggingface_hub.hf_hub_download(repo, repo_type="dataset", filename=p) for p in parts]
-        tar_path = dest / f"{task}.tar.gz"
-        with open(tar_path, "wb") as out:
-            for lp in local:
-                with open(lp, "rb") as pf:
-                    shutil.copyfileobj(pf, out)
-        with tarfile.open(tar_path, "r:gz") as tf:
-            tf.extractall(dest)
-        tar_path.unlink()
-        done.touch()
-    ts = record_id.split("/")[-2]
-    hits = glob.glob(f"{dest}/**/{ts}/data/trajectory.hdf5", recursive=True)
-    if not hits:
-        raise FileNotFoundError(f"trajectory.hdf5 not found for {record_id}")
-    return hits[0]
+
+    def _find(ts):
+        hits = glob.glob(f"{dest}/**/{ts}/data/trajectory.hdf5", recursive=True)
+        return hits[0] if hits else None
+
+    result = {}
+    wanted_members = []
+    for rid in record_ids:
+        ts = rid.split("/")[-2]
+        hit = _find(ts)
+        if hit:
+            result[ts] = hit
+        else:
+            wanted_members.append(_member_of(rid))
+    if not wanted_members:
+        return result
+
+    downloaded = part_paths is None
+    if downloaded:
+        part_paths = _download_task_parts(repo, task)
+    dest.mkdir(parents=True, exist_ok=True)
+    _stream_extract_members(part_paths, wanted_members, dest)
+    if cleanup_parts and downloaded:  # reclaim the ~400GB archive once its frames are extracted
+        _delete_part_blobs(part_paths)
+
+    for rid in record_ids:
+        ts = rid.split("/")[-2]
+        if ts not in result:
+            hit = _find(ts)
+            if hit:
+                result[ts] = hit
+    return result

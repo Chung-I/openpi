@@ -45,6 +45,23 @@ def test_pi0_mem_ll_loss():
     assert loss.shape == (batch_size, config.action_horizon)
 
 
+def test_pi0_mem_k1_forward_uses_video_path():
+    key = jax.random.key(0)
+    config = Pi0MEMConfig(
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+        num_video_frames=1,
+    )
+    model = config.create(key)
+    obs, act = config.fake_obs(2), config.fake_act(2)
+    # K=1 obs must still carry a video tensor with a single frame.
+    assert obs.video_images is not None
+    assert np.asarray(obs.video_images["base_0_rgb"]).shape[1] == 1
+    loss = nnx_utils.module_jit(model.compute_loss)(key, obs, act)
+    assert loss.shape == (2, config.action_horizon)
+    assert jnp.all(jnp.isfinite(loss))
+
+
 def test_pi0_mem_sample_actions():
     key = jax.random.key(0)
     config = Pi0MEMConfig(

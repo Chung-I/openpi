@@ -409,7 +409,7 @@ class RLDSDroidDataConfig(DataConfigFactory):
             "actions": "actions",
             "prompt": "prompt",
         }
-        if model_config.model_type == _model.ModelType.PI0_MEM and getattr(model_config, "num_video_frames", 1) > 1:
+        if model_config.model_type == _model.ModelType.PI0_MEM and getattr(model_config, "num_video_frames", 1) >= 1:
             repack_map.update({
                 "observation/video_exterior_image_1_left": "observation/video_image",
                 "observation/video_wrist_image_left": "observation/video_wrist_image",

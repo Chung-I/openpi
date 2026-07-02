@@ -66,8 +66,9 @@ def test_unstack_scanned_encoderblocks():
 
 def test_remapped_video_img_matches_siglip():
     """Un-stacked scan=True SigLIP weights, loaded into a K=1 VideoViTEncoder, must
-    reproduce the SigLIP output bit-for-bit (atol 1e-5). This is A's equivalence proof
-    extended through the scan un-stack that B introduces."""
+    reproduce the SigLIP output to ~1e-6 under highest matmul precision (asserted at
+    atol 1e-5). This is A's equivalence proof extended through the scan un-stack that B
+    introduces."""
     import flax.core
     import flax.traverse_util as tu
     import jax

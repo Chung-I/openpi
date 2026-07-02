@@ -77,7 +77,7 @@ def test_remapped_video_img_matches_siglip():
     from openpi.models.video_vit import VideoViTConfig
     from openpi.models.video_vit import VideoViTEncoder
 
-    kw = {"num_classes": 32, "variant": "mu/2", "pool_type": "none", "dtype_mm": "float32"}
+    kw = {"variant": "mu/2", "pool_type": "none", "dtype_mm": "float32"}
     siglip = _siglip.Module(scan=True, **kw)              # checkpoint layout (stacked blocks)
     video = VideoViTEncoder(
         config=VideoViTConfig(num_video_frames=1, temporal_attn_every_n_layers=4),
@@ -97,4 +97,7 @@ def test_remapped_video_img_matches_siglip():
     video_params = {"params": tu.unflatten_dict(flat_video, sep="/")}
     video_out, _ = video.apply(video_params, clip, train=False)
 
+    assert not np.allclose(np.array(siglip_out), 0.0), (
+        "SigLIP output is degenerate (all zeros) — comparison would be vacuous"
+    )
     np.testing.assert_allclose(np.array(siglip_out), np.array(video_out), atol=1e-5)

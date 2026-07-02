@@ -1,9 +1,11 @@
 import dataclasses
 
 import flax.nnx as nnx
+import flax.traverse_util as _tu
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from openpi.models import model as _model
 from openpi.models.pi0_mem_config import Pi0MEMConfig
@@ -321,3 +323,34 @@ def test_get_prefix_weights_invalid_schedule_raises():
 
     with pytest.raises(ValueError):
         get_prefix_weights(0, 4, 6, "bogus")
+
+
+def _param_partition(num_video_frames):
+    """Return (trainable_keys, frozen_keys) for a LoRA Pi0MEM, via eval_shape (no weights)."""
+    cfg = Pi0MEMConfig(lora=True, num_video_frames=num_video_frames)
+    freeze = cfg.get_freeze_filter()
+
+    def f(rng):
+        model = cfg.create(rng)
+        trainable = nnx.state(model, nnx.All(nnx.Param, nnx.Not(freeze))).to_pure_dict()
+        frozen = nnx.state(model, nnx.All(nnx.Param, freeze)).to_pure_dict()
+        return trainable, frozen
+
+    trainable, frozen = jax.eval_shape(f, jax.random.key(0))
+    tks = set(_tu.flatten_dict(trainable, sep="/"))
+    fks = set(_tu.flatten_dict(frozen, sep="/"))
+    return tks, fks
+
+
+@pytest.mark.parametrize("k", [1, 6])
+def test_lora_freeze_partition(k):
+    trainable, frozen = _param_partition(k)
+    # video_img (VideoViTEncoder), state_proj, and lora adapters must be trainable.
+    assert any("video_img" in key for key in trainable), "video_img must be trainable"
+    assert any("state_proj" in key for key in trainable), "state_proj must be trainable"
+    assert any("lora" in key for key in trainable), "lora adapters must be trainable"
+    # Base LLM weights (non-lora) must be frozen; no lora param may be frozen.
+    assert any("llm" in key for key in frozen), "base llm must be frozen"
+    assert all("lora" not in key for key in frozen), "no lora param may be frozen"
+    # Any trainable llm-path key must be a lora adapter (base attn/ffn stay frozen).
+    assert all("lora" in key for key in trainable if "llm" in key)

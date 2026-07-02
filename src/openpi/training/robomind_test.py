@@ -133,11 +133,13 @@ def test_read_fps_default_when_missing(tmp_path):
 
 def test_decode_resize_raw_flat():
     import numpy as np
-    flat = np.full(rm._RAW_H * rm._RAW_W * 3, 200, np.uint8)  # noqa: SLF001 -- real RoboMIND frame layout
+    flat = np.full(rm._RAW_H * rm._RAW_W * 3, 200, np.uint8)  # noqa: SLF001 -- real RoboMIND 720x1280 layout
     out = rm._decode_resize(flat, size=224)  # noqa: SLF001
     assert out.shape == (224, 224, 3)
     assert out.dtype == np.uint8
-    assert int(out.mean()) == 200  # constant frame survives reshape+resize
+    # letterbox (aspect-preserving + pad): content in the center, black pad at top/bottom
+    assert out[112, 112].tolist() == [200, 200, 200]
+    assert out[0, 0].tolist() == [0, 0, 0]
 
 
 def test_decode_resize_raw_flat_640x480():
@@ -146,7 +148,8 @@ def test_decode_resize_raw_flat_640x480():
     flat = np.full(480 * 640 * 3, 150, np.uint8)
     out = rm._decode_resize(flat, size=224)  # noqa: SLF001
     assert out.shape == (224, 224, 3)
-    assert int(out.mean()) == 150
+    assert out[112, 112].tolist() == [150, 150, 150]  # center = content
+    assert out[0, 0].tolist() == [0, 0, 0]  # corner = pad
 
 
 def test_decode_resize_raises_on_bad_jpeg():

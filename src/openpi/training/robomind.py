@@ -119,6 +119,22 @@ _RAW_H, _RAW_W = 720, 1280
 _RAW_SHAPES = {_RAW_H * _RAW_W * 3: (_RAW_H, _RAW_W, 3), 480 * 640 * 3: (480, 640, 3)}
 
 
+def _resize_with_pad(arr: np.ndarray, size: int) -> np.ndarray:
+    """Aspect-preserving resize to size x size, black-padded (letterbox). Matches openpi's
+    `image_tools.resize_with_pad` math so RoboMIND frames get the SAME preprocessing as DROID:
+    stretching to a square (cv2.resize(size,size)) would distort geometry vs the pretrained SigLIP."""
+    import cv2
+
+    h, w = arr.shape[:2]
+    ratio = max(w / size, h / size)
+    rh, rw = int(h / ratio), int(w / ratio)
+    resized = cv2.resize(arr, (rw, rh), interpolation=cv2.INTER_LINEAR)
+    ph0, rem_h = divmod(size - rh, 2)
+    pw0, rem_w = divmod(size - rw, 2)
+    padded = np.pad(resized, ((ph0, ph0 + rem_h), (pw0, pw0 + rem_w), (0, 0)), constant_values=0)
+    return padded.astype(np.uint8)
+
+
 def _decode_resize(raw, size: int = 224) -> np.ndarray:
     import cv2
 
@@ -133,7 +149,7 @@ def _decode_resize(raw, size: int = 224) -> np.ndarray:
             arr = arr.reshape(_RAW_SHAPES[arr.size])
         else:
             raise ValueError(f"unrecognized 1-D frame buffer of size {arr.size} (not JPEG, not a known raw RGB size)")
-    return cv2.resize(arr, (size, size)).astype(np.uint8)
+    return _resize_with_pad(arr, size)
 
 
 def read_fps(h5_path: str, default: float) -> float:

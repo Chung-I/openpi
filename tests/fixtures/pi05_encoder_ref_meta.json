@@ -1,0 +1,10 @@
+{
+  "siglip_sha256": "14b4df0be280d5769fb0dc31a40cde27525dbb1980cc998c28475d62fa3cad32",
+  "siglip_kwargs": {
+    "num_classes": 32,
+    "variant": "mu/2",
+    "pool_type": "none",
+    "scan": false,
+    "dtype_mm": "float32"
+  }
+}

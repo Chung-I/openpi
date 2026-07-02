@@ -1,5 +1,9 @@
 """Tests for VideoViT space-time separable attention module."""
 
+import hashlib
+import json
+import pathlib
+
 import flax.core
 import jax
 import jax.numpy as jnp
@@ -8,6 +12,15 @@ import pytest
 
 import openpi.models.siglip as _siglip
 from openpi.models.video_vit import VideoViTConfig, VideoViTEncoder
+
+_FIX = pathlib.Path(__file__).resolve().parents[3] / "tests" / "fixtures"
+
+
+def _load_fixture_params(template):
+    import flax.serialization
+
+    data = (_FIX / "pi05_encoder_ref.msgpack").read_bytes()
+    return flax.serialization.from_bytes(template, data)
 
 
 def _make_siglip(dtype="float32"):
@@ -151,3 +164,37 @@ def test_past_frame_influence():
     # With causal attention, the current frame (last) CAN see past frames,
     # so changing a past frame changes the output.
     assert not jnp.allclose(out1, out2), "Past frame change must influence current output via temporal attention"
+
+
+def test_k1_matches_origin_main_pi05_encoder():
+    """K=1 VideoViTEncoder, loaded with origin/main pi0.5-encoder weights, must
+    reproduce the origin/main encoder output bit-for-bit (atol 1e-5)."""
+    meta = json.loads((_FIX / "pi05_encoder_ref_meta.json").read_text())
+    kwargs = meta["siglip_kwargs"]
+
+    image = np.load(_FIX / "pi05_encoder_ref_image.npy")  # [1, 16, 16, 3]
+    ref_out = np.load(_FIX / "pi05_encoder_ref_out.npy")
+    video = jnp.asarray(image)[:, None, :, :, :]  # [1, 1, 16, 16, 3]
+
+    video_vit = VideoViTEncoder(
+        config=VideoViTConfig(num_video_frames=1, temporal_attn_every_n_layers=4),
+        siglip_kwargs=flax.core.FrozenDict(kwargs),
+    )
+    template = video_vit.init(jax.random.key(0), video, train=False)["params"]
+    params = _load_fixture_params(template)  # raises if param trees differ
+    out, _ = video_vit.apply({"params": params}, video, train=False)
+
+    np.testing.assert_allclose(
+        np.array(out), ref_out, atol=1e-5,
+        err_msg="K=1 VideoViTEncoder must match origin/main pi0.5 image encoder",
+    )
+
+
+def test_siglip_unchanged_since_fixture():
+    """Guard: siglip.py must match the origin/main version the fixture was built
+    from. If this fails, regenerate the fixture (Task 3)."""
+    meta = json.loads((_FIX / "pi05_encoder_ref_meta.json").read_text())
+    current = hashlib.sha256(pathlib.Path(_siglip.__file__).read_bytes()).hexdigest()
+    assert current == meta["siglip_sha256"], (
+        "siglip.py changed vs origin/main fixture; regenerate the golden fixture."
+    )

@@ -34,3 +34,27 @@ def test_pi0_mem_k1_debug_config_registered():
     cfg = _config.get_config("pi0_mem_k1_debug")
     assert cfg.model.num_video_frames == 1
     assert cfg.wandb_enabled is False
+
+
+def test_num_video_frames_for_is_zero_for_non_mem():
+    from openpi.models.pi0_config import Pi0Config
+    from openpi.training.data_loader import _num_video_frames_for
+
+    assert _num_video_frames_for(Pi0Config()) == 0
+
+
+def test_num_video_frames_for_matches_mem_k():
+    from openpi.training.data_loader import _num_video_frames_for
+
+    assert (
+        _num_video_frames_for(
+            Pi0MEMConfig(num_video_frames=1, paligemma_variant="dummy", action_expert_variant="dummy")
+        )
+        == 1
+    )
+    assert (
+        _num_video_frames_for(
+            Pi0MEMConfig(num_video_frames=6, paligemma_variant="dummy", action_expert_variant="dummy")
+        )
+        == 6
+    )

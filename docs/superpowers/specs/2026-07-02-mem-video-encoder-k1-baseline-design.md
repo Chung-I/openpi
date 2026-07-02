@@ -72,7 +72,9 @@ to `>= 1` so a MEM model **always** takes the video path:
 
 **Semantics:** "a PI0_MEM model always receives video frames, even if K=1." Only affects K=1 MEM
 (no existing config uses it; debug configs use K=2, unaffected by `>=1`). Loses a trivial K=1
-decode fast-path — negligible.
+decode fast-path — negligible. The two `droid_rlds_dataset.py` gates above are model-agnostic, so
+non-MEM DROID configs are kept off by passing `num_video_frames=0` from `data_loader.py`
+(`_num_video_frames_for`).
 
 **Rationale over alternatives:** a dedicated `unify_video_path` flag (A2) adds config surface for
 a distinction we always want here; model-side wrapping of `obs.images` into a K=1 video (A3)

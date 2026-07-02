@@ -199,9 +199,12 @@ DROID RLDS (stream from GCS)
   `result.keys() == reference.keys()` (nothing silently dropped), base keys took loaded values,
   `lora`/`state_proj`/`video_img` took fresh init. Pins the regex to the actual MEM key names and
   proves the fresh-init fallback for `video_img` is safe when the remap is absent.
-- **T-B3 — LoRA forward+grad smoke.** One fwd+bwd on dummy `Pi0MEM(lora=True)` at K=1 and K=6:
-  finite loss; **non-zero** grads on `video_img`/`lora`/`state_proj`; frozen base receives no
-  update.
+- **T-B3 — LoRA forward+grad smoke.** Realized as the **NCHC 10-step smoke** (below), not a
+  committed CPU unit test: `dummy` gemma variants create **no** LoRA params (only `gemma_*_lora`
+  do), and instantiating `gemma_2b` for a real fwd/bwd is too heavy for CI. The 10-step smoke on
+  the real `gemma_2b_lora` model checks a **finite, non-increasing** loss (and, by construction,
+  the optimizer is built over `trainable_filter` only, so frozen base gets no update — T-B1 locks
+  that partition). T-B1 covers the trainable/frozen partition at unit scale via `eval_shape`.
 - **T-B4 — SigLIP → `video_img` remap equivalence.** Apply the Change-2 remap from a SigLIP
   (`scan=True`) param tree into a `video_img` (`scan=False`) tree; assert per-layer params equal
   the un-stacked source, and (tying to A) a K=1 forward through the remapped `video_img` equals a

@@ -89,13 +89,19 @@ def test_remapped_video_img_matches_siglip():
     rng = jax.random.key(0)
 
     siglip_vars = siglip.init(rng, image, train=False)
-    siglip_out, _ = siglip.apply(siglip_vars, image, train=False)
 
-    # Un-stack the SigLIP params and load them into the K=1 VideoViTEncoder.
-    flat_img = tu.flatten_dict(siglip_vars["params"], sep="/")
-    flat_video = wl._unstack_scanned_encoderblocks(flat_img)  # noqa: SLF001
-    video_params = {"params": tu.unflatten_dict(flat_video, sep="/")}
-    video_out, _ = video.apply(video_params, clip, train=False)
+    # The un-stack crosses scan=True (stacked encoderblocks) -> scan=False (unrolled per-layer)
+    # execution paths, whose default-precision matmul reduction order differs (~5e-4 drift).
+    # "highest" precision makes both paths use full-precision matmuls, proving the remap is
+    # algebraically exact (the two outputs then agree to ~1e-6).
+    with jax.default_matmul_precision("highest"):
+        siglip_out, _ = siglip.apply(siglip_vars, image, train=False)
+
+        # Un-stack the SigLIP params and load them into the K=1 VideoViTEncoder.
+        flat_img = tu.flatten_dict(siglip_vars["params"], sep="/")
+        flat_video = wl._unstack_scanned_encoderblocks(flat_img)  # noqa: SLF001
+        video_params = {"params": tu.unflatten_dict(flat_video, sep="/")}
+        video_out, _ = video.apply(video_params, clip, train=False)
 
     assert not np.allclose(np.array(siglip_out), 0.0), (
         "SigLIP output is degenerate (all zeros) — comparison would be vacuous"

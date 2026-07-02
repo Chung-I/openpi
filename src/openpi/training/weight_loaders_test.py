@@ -39,3 +39,62 @@ def test_merge_params_no_silent_drop_and_fresh_init():
     np.testing.assert_array_equal(flat_merged["PaliGemma/video_img/embedding/kernel"], np.ones((2, 2)))
     np.testing.assert_array_equal(flat_merged["PaliGemma/llm_lora/lora_a"], np.ones((4, 2)))
     np.testing.assert_array_equal(flat_merged["state_proj/kernel"], np.ones((3, 4)))
+
+
+def test_unstack_scanned_encoderblocks():
+    depth = 3
+    flat = {
+        "embedding/kernel": np.zeros((2, 2, 3, 4), np.float32),          # non-block: copied as-is
+        "pos_embedding": np.zeros((1, 5, 8), np.float32),                # non-block: copied as-is
+        "Transformer/encoderblock/LayerNorm_0/scale": np.arange(depth * 8, dtype=np.float32).reshape(depth, 8),
+        "Transformer/encoder_norm/scale": np.zeros((8,), np.float32),    # non-block: copied as-is
+    }
+    out = wl._unstack_scanned_encoderblocks(flat)  # noqa: SLF001
+
+    assert out["embedding/kernel"].shape == (2, 2, 3, 4)
+    assert out["pos_embedding"].shape == (1, 5, 8)
+    assert out["Transformer/encoder_norm/scale"].shape == (8,)
+    # Stacked block split into depth per-layer blocks, leading axis removed.
+    for i in range(depth):
+        assert out[f"Transformer/encoderblock_{i}/LayerNorm_0/scale"].shape == (8,)
+        np.testing.assert_array_equal(
+            out[f"Transformer/encoderblock_{i}/LayerNorm_0/scale"],
+            np.arange(depth * 8, dtype=np.float32).reshape(depth, 8)[i],
+        )
+    assert "Transformer/encoderblock/LayerNorm_0/scale" not in out
+
+
+def test_remapped_video_img_matches_siglip():
+    """Un-stacked scan=True SigLIP weights, loaded into a K=1 VideoViTEncoder, must
+    reproduce the SigLIP output bit-for-bit (atol 1e-5). This is A's equivalence proof
+    extended through the scan un-stack that B introduces."""
+    import flax.core
+    import flax.traverse_util as tu
+    import jax
+    import jax.numpy as jnp
+
+    import openpi.models.siglip as _siglip
+    from openpi.models.video_vit import VideoViTConfig
+    from openpi.models.video_vit import VideoViTEncoder
+
+    kw = {"num_classes": 32, "variant": "mu/2", "pool_type": "none", "dtype_mm": "float32"}
+    siglip = _siglip.Module(scan=True, **kw)              # checkpoint layout (stacked blocks)
+    video = VideoViTEncoder(
+        config=VideoViTConfig(num_video_frames=1, temporal_attn_every_n_layers=4),
+        siglip_kwargs=flax.core.FrozenDict(scan=False, **kw),  # per-layer layout
+    )
+
+    image = jnp.ones((1, 224, 224, 3))
+    clip = image[:, None]  # [1, 1, 224, 224, 3]
+    rng = jax.random.key(0)
+
+    siglip_vars = siglip.init(rng, image, train=False)
+    siglip_out, _ = siglip.apply(siglip_vars, image, train=False)
+
+    # Un-stack the SigLIP params and load them into the K=1 VideoViTEncoder.
+    flat_img = tu.flatten_dict(siglip_vars["params"], sep="/")
+    flat_video = wl._unstack_scanned_encoderblocks(flat_img)  # noqa: SLF001
+    video_params = {"params": tu.unflatten_dict(flat_video, sep="/")}
+    video_out, _ = video.apply(video_params, clip, train=False)
+
+    np.testing.assert_allclose(np.array(siglip_out), np.array(video_out), atol=1e-5)

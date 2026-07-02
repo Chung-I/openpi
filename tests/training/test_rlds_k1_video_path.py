@@ -28,3 +28,9 @@ def test_video_window_indices_k1_is_current_frame():
 
     idx = np.asarray(_video_window_indices(5, 1, 15))
     np.testing.assert_array_equal(idx, [[0], [1], [2], [3], [4]])
+
+
+def test_pi0_mem_k1_debug_config_registered():
+    cfg = _config.get_config("pi0_mem_k1_debug")
+    assert cfg.model.num_video_frames == 1
+    assert cfg.wandb_enabled is False

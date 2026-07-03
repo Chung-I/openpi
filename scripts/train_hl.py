@@ -114,7 +114,9 @@ def main(config: config_hl.HLTrainConfig, *, overfit_batch: bool = False):
         with sharding.set_mesh(mesh):
             state, info = ptrain(train_rng, state, batch)
         if step % config.log_interval == 0:
-            wandb.log({f"train/{k}": float(v) for k, v in info.items()}, step=step)
+            reduced = {k: float(v) for k, v in info.items()}
+            wandb.log({f"train/{k}": v for k, v in reduced.items()}, step=step)
+            logging.info("step %d train: %s", step, reduced)
         if not overfit_batch and step > 0 and step % config.eval_interval == 0:
             _eval_and_log(dev, step)
         if not overfit_batch and step > 0 and step % config.save_interval == 0:

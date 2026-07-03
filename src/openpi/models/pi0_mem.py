@@ -646,9 +646,7 @@ class Pi0MEM(_model.BaseModel):
         Ported from real-time-chunking-kinetix realtime_action (soft-guidance branch),
         run in the kinetix tau-frame (tau = 1 - pi0_mem_time, v_tau = -v_t).
         """
-        observation = _model.preprocess_observation(
-            None, observation, train=False, image_keys=tuple(observation.images)
-        )
+        observation = _model.preprocess_observation(None, observation, train=False)
         batch_size = observation.state.shape[0]
         if noise is None:
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))

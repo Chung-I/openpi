@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --account=MST114563
 #SBATCH --partition=8gpus
-#SBATCH --gres=gpu:4
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=400G
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=200G
 #SBATCH --time=4:00:00
 #SBATCH --job-name=pi05_serve
 #SBATCH --output=/work/roboleon1295/openpi/logs/pi05_serve_%j.log

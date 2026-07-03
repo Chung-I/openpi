@@ -36,6 +36,7 @@ logger = logging.getLogger("openpi")
 # PaliGemma tokenizer special token IDs (SentencePiece / Gemma vocab).
 _PALIGEMMA_BOS_TOKEN_ID: int = 2
 _PALIGEMMA_EOS_TOKEN_ID: int = 1
+_PALIGEMMA_SEP_TOKEN_ID: int = 108  # "\n" — PaliGemma prefix/suffix separator
 
 
 def get_prefix_weights(start: int, end: int, total: int, schedule: str) -> jax.Array:
@@ -268,14 +269,17 @@ class Pi0MEM(_model.BaseModel):
     def embed_prefix_hl(
         self, obs: _model.Observation
     ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Bool[at.Array, " s"]]:
-        """Embed prefix for HL policy: single-frame image + memory + goal.
+        """Embed prefix for HL policy in PaliGemma format: image + BOS + memory + goal + SEP.
 
-        All prefix tokens use bidirectional attention (ar_mask=False). Uses the
-        standard single-frame SigLIP encoder, NOT the video encoder.
+        Follows PaliGemma's layout ``[image tokens] BOS [text prefix] SEP(\\n)`` with full
+        (bidirectional) attention over the whole prefix (ar_mask=False). The suffix (target)
+        is generated after the SEP, with its first token predicted from the SEP position.
+        Uses the standard single-frame SigLIP encoder, NOT the video encoder.
         """
         input_mask = []
         ar_mask: list[bool] = []
         tokens = []
+        batch_size = obs.state.shape[0]
 
         # Single-frame image tokens (standard SigLIP, not VideoViT)
         for name in obs.images:
@@ -285,6 +289,12 @@ class Pi0MEM(_model.BaseModel):
                 einops.repeat(obs.image_masks[name], "b -> b s", s=image_tokens.shape[1])
             )
             ar_mask += [False] * image_tokens.shape[1]
+
+        # BOS marks the start of the text tokens (PaliGemma format).
+        bos = jnp.full((batch_size, 1), _PALIGEMMA_BOS_TOKEN_ID, dtype=jnp.int32)
+        tokens.append(self.PaliGemma.llm(bos, method="embed"))
+        input_mask.append(jnp.ones((batch_size, 1), dtype=jnp.bool_))
+        ar_mask += [False]
 
         # Memory tokens (episodic memory from prior HL steps)
         if obs.tokenized_memory is not None:
@@ -299,6 +309,12 @@ class Pi0MEM(_model.BaseModel):
             tokens.append(prompt_emb)
             input_mask.append(obs.tokenized_prompt_mask)
             ar_mask += [False] * prompt_emb.shape[1]
+
+        # SEP ("\n") ends the prefix; the suffix (target) is generated from here.
+        sep = jnp.full((batch_size, 1), _PALIGEMMA_SEP_TOKEN_ID, dtype=jnp.int32)
+        tokens.append(self.PaliGemma.llm(sep, method="embed"))
+        input_mask.append(jnp.ones((batch_size, 1), dtype=jnp.bool_))
+        ar_mask += [False]
 
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
@@ -346,24 +362,23 @@ class Pi0MEM(_model.BaseModel):
             positions=positions,
         )
 
-        # Slice output positions corresponding to target tokens and project to logits
+        # PaliGemma next-token prediction: the output at the position BEFORE each target
+        # token predicts it. The last prefix token (SEP, index prefix_len-1) predicts
+        # target[0]; target[i] predicts target[i+1]. So take outputs at
+        # [prefix_len-1 .. prefix_len+t-2] to predict target[0..t-1] (no target shift) —
+        # this supervises the FIRST target token from the prefix, so generation can start.
         prefix_len = prefix_tokens.shape[1]
-        target_output = hl_output[:, prefix_len:, :]  # [b, t, d]
-        logits = self.PaliGemma.llm(target_output, method="decode_logits")  # [b, t, vocab]
+        pred_output = hl_output[:, prefix_len - 1 : -1, :]  # [b, t, d]
+        logits = self.PaliGemma.llm(pred_output, method="decode_logits")  # [b, t, vocab]
 
-        # Next-token prediction: logits[i] predicts target[i+1]
-        shifted_logits = logits[:, :-1, :]  # [b, t-1, vocab]
-        shifted_targets = target_tokens[:, 1:]  # [b, t-1]
-        shifted_mask = target_mask[:, 1:]  # [b, t-1]
-
-        log_probs = jax.nn.log_softmax(shifted_logits, axis=-1)
+        log_probs = jax.nn.log_softmax(logits, axis=-1)
         token_losses = -jnp.take_along_axis(
-            log_probs, shifted_targets[:, :, None], axis=-1
-        ).squeeze(-1)  # [b, t-1]
+            log_probs, target_tokens[:, :, None], axis=-1
+        ).squeeze(-1)  # [b, t]
 
         # Masked mean per example
-        return jnp.sum(token_losses * shifted_mask, axis=-1) / jnp.maximum(
-            jnp.sum(shifted_mask, axis=-1), 1
+        return jnp.sum(token_losses * target_mask, axis=-1) / jnp.maximum(
+            jnp.sum(target_mask, axis=-1), 1
         )
 
     def predict_subtask_and_memory(
@@ -379,8 +394,8 @@ class Pi0MEM(_model.BaseModel):
         so it should be called outside of jit when max_new_tokens is variable.
 
         Returns:
-            Generated token IDs of shape [b, max_new_tokens], NOT including the
-            leading BOS token.
+            Generated token IDs of shape [b, <=max_new_tokens] (the target text; no BOS is
+            injected — the first token is predicted from the prefix's last (SEP) position).
         """
         observation = _model.preprocess_observation(
             None, observation, train=False, image_keys=tuple(observation.images)
@@ -388,43 +403,35 @@ class Pi0MEM(_model.BaseModel):
         batch_size = observation.state.shape[0]
 
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix_hl(observation)
-        prefix_len = prefix_tokens.shape[1]
 
-        # Seed the generated sequence with BOS
-        generated = jnp.full((batch_size, 1), _PALIGEMMA_BOS_TOKEN_ID, dtype=jnp.int32)
-
+        # PaliGemma-style generation: NO BOS is injected. The first target token is predicted
+        # from the last prefix position (the SEP); subsequent tokens autoregress. Each step
+        # re-runs [prefix (+ generated)] and reads the last position's logits.
+        generated = None
         for _ in range(max_new_tokens):
-            gen_len = generated.shape[1]
+            if generated is None:
+                input_emb, seq_mask, seq_ar_mask = prefix_tokens, prefix_mask, prefix_ar_mask
+            else:
+                gen_emb = self.PaliGemma.llm(generated, method="embed")
+                gen_mask = jnp.ones((batch_size, generated.shape[1]), dtype=jnp.bool_)
+                gen_ar_mask = jnp.ones(generated.shape[1], dtype=jnp.bool_)
+                input_emb = jnp.concatenate([prefix_tokens, gen_emb], axis=1)
+                seq_mask = jnp.concatenate([prefix_mask, gen_mask], axis=1)
+                seq_ar_mask = jnp.concatenate([prefix_ar_mask, gen_ar_mask], axis=0)
 
-            # Embed all generated tokens so far
-            gen_emb = self.PaliGemma.llm(generated, method="embed")  # [b, gen_len, d]
+            attn_mask = make_attn_mask(seq_mask, seq_ar_mask)
+            positions = jnp.cumsum(seq_mask, axis=1) - 1
+            (hl_output, _), _ = self.PaliGemma.llm([input_emb, None], mask=attn_mask, positions=positions)
 
-            # Build attention mask: prefix is bidirectional, each generated token is
-            # its own AR block (strictly causal within generated sequence)
-            gen_mask = jnp.ones((batch_size, gen_len), dtype=jnp.bool_)
-            gen_ar_mask = jnp.ones(gen_len, dtype=jnp.bool_)  # one block per token
-            input_mask = jnp.concatenate([prefix_mask, gen_mask], axis=1)
-            full_ar_mask = jnp.concatenate([prefix_ar_mask, gen_ar_mask], axis=0)
-            attn_mask = make_attn_mask(input_mask, full_ar_mask)
-            positions = jnp.cumsum(input_mask, axis=1) - 1
-
-            (hl_output, _), _ = self.PaliGemma.llm(
-                [jnp.concatenate([prefix_tokens, gen_emb], axis=1), None],
-                mask=attn_mask,
-                positions=positions,
-            )
-
-            # Get logits at the last generated position and sample greedily
-            last_hidden = hl_output[:, prefix_len + gen_len - 1 : prefix_len + gen_len, :]
+            last_hidden = hl_output[:, -1:, :]  # last position predicts the next token
             logits = self.PaliGemma.llm(last_hidden, method="decode_logits")  # [b, 1, vocab]
-            next_token = jnp.argmax(logits[:, 0, :], axis=-1, keepdims=True)  # [b, 1]
-            generated = jnp.concatenate([generated, next_token], axis=1)
+            next_token = jnp.argmax(logits[:, 0, :], axis=-1, keepdims=True).astype(jnp.int32)  # [b, 1]
+            generated = next_token if generated is None else jnp.concatenate([generated, next_token], axis=1)
 
             if jnp.all(next_token == _PALIGEMMA_EOS_TOKEN_ID):
                 break
 
-        # Return generated tokens, stripping the leading BOS token
-        return generated[:, 1:]
+        return generated
 
     def predict_subtask_and_memory_cached(
         self,
@@ -436,8 +443,9 @@ class Pi0MEM(_model.BaseModel):
         """KV-cache greedy decode of subtask+memory text (O(T), faithful to the naive loop).
 
         Fills the HL prefix KV cache once, then decodes token-by-token feeding only the
-        newest token against the cache. Returns generated ids with the leading BOS stripped.
-        Bit-equivalent to predict_subtask_and_memory (see pi0_mem_test).
+        newest token against the cache. First token comes from the prefix's last (SEP)
+        position; no BOS is injected. Bit-equivalent to predict_subtask_and_memory (see
+        pi0_mem_test).
         """
         observation = _model.preprocess_observation(
             None, observation, train=False, image_keys=tuple(observation.images)
@@ -447,17 +455,21 @@ class Pi0MEM(_model.BaseModel):
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix_hl(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=prefix_positions)
+        (prefix_out, _), kv_cache = self.PaliGemma.llm(
+            [prefix_tokens, None], mask=prefix_attn_mask, positions=prefix_positions
+        )
 
-        # Number of real (non-padding) prefix tokens per row.
-        n_prefix = jnp.sum(prefix_mask, axis=1)  # [b]
-        cur = jnp.full((batch_size, 1), _PALIGEMMA_BOS_TOKEN_ID, dtype=jnp.int32)
+        n_prefix = jnp.sum(prefix_mask, axis=1)  # [b] real prefix length
+
+        # First target token: predicted from the last prefix position (SEP) — no BOS injected.
+        logits = self.PaliGemma.llm(prefix_out[:, -1:, :], method="decode_logits")
+        cur = jnp.argmax(logits[:, 0, :], axis=-1, keepdims=True).astype(jnp.int32)
         generated = cur
 
-        for i in range(max_new_tokens):
-            tok_emb = self.PaliGemma.llm(cur, method="embed")  # [b, 1, d]
-            positions = (n_prefix + i)[:, None]  # [b, 1] absolute position of this token
-            # Attend to all real prefix tokens + the i already-cached generated tokens + itself.
+        for i in range(max_new_tokens - 1):
+            tok_emb = self.PaliGemma.llm(cur, method="embed")  # embed target[i]
+            positions = (n_prefix + i)[:, None]  # target[i] sits right after the real prefix
+            # Attend to all real prefix tokens + the generated tokens so far + itself.
             step_mask = jnp.concatenate(
                 [prefix_mask, jnp.ones((batch_size, i + 1), dtype=jnp.bool_)], axis=1
             )[:, None, :]  # [b, 1, prefix_len + i + 1]
@@ -470,7 +482,7 @@ class Pi0MEM(_model.BaseModel):
             if jnp.all(cur == _PALIGEMMA_EOS_TOKEN_ID):
                 break
 
-        return generated[:, 1:]
+        return generated
 
     @at.typecheck
     def compute_loss_fast(

@@ -126,6 +126,23 @@ def main(config: config_hl.HLTrainConfig, *, overfit_batch: bool = False):
 
     if not overfit_batch:
         _eval_and_log({"test": test_ds}, config.num_train_steps)
+    else:
+        # Generation round-trip: after memorizing the fixed batch, does free-generation
+        # reproduce its targets? (Validates the PaliGemma-format generation fix, A.)
+        from openpi.policies.mem_policy import MEMPolicy
+
+        model = nnx.merge(state.model_def, state.params)
+        model.eval()
+        obs_f, tgt_f, _ = fixed
+        gen = np.asarray(model.predict_subtask_and_memory_cached(train_rng, obs_f, max_new_tokens=config.max_new_tokens))
+        hits = 0
+        for j in range(gen.shape[0]):
+            gtxt = hl_training._decode_ids_to_text(tokenizer, gen[j])
+            ttxt = hl_training._decode_ids_to_text(tokenizer, np.asarray(tgt_f[j]))
+            hits += int(MEMPolicy._parse_hl_output(gtxt) == MEMPolicy._parse_hl_output(ttxt))
+            if j < 4:
+                logging.info("overfit gen[%d]: TARGET=%r GEN=%r", j, ttxt, gtxt)
+        logging.info("overfit exact-match: %d/%d", hits, gen.shape[0])
     ckpt_mgr.wait_until_finished()
 
 

@@ -320,7 +320,11 @@ class Pi0MEM(_model.BaseModel):
         Uses teacher forcing: the target sequence is fed as input and the model
         is trained to predict the next token at each position.
         """
-        observation = _model.preprocess_observation(rng, observation, train=train)
+        # HL uses only the cameras present (single-frame o_t; RoboMIND HL data has base_0_rgb
+        # only). Restrict preprocessing to present keys so it doesn't demand the LL 3-camera set.
+        observation = _model.preprocess_observation(
+            rng, observation, train=train, image_keys=tuple(observation.images)
+        )
 
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix_hl(observation)
 
@@ -378,7 +382,9 @@ class Pi0MEM(_model.BaseModel):
             Generated token IDs of shape [b, max_new_tokens], NOT including the
             leading BOS token.
         """
-        observation = _model.preprocess_observation(None, observation, train=False)
+        observation = _model.preprocess_observation(
+            None, observation, train=False, image_keys=tuple(observation.images)
+        )
         batch_size = observation.state.shape[0]
 
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix_hl(observation)
@@ -433,7 +439,9 @@ class Pi0MEM(_model.BaseModel):
         newest token against the cache. Returns generated ids with the leading BOS stripped.
         Bit-equivalent to predict_subtask_and_memory (see pi0_mem_test).
         """
-        observation = _model.preprocess_observation(None, observation, train=False)
+        observation = _model.preprocess_observation(
+            None, observation, train=False, image_keys=tuple(observation.images)
+        )
         batch_size = observation.state.shape[0]
 
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix_hl(observation)
@@ -638,7 +646,9 @@ class Pi0MEM(_model.BaseModel):
         Ported from real-time-chunking-kinetix realtime_action (soft-guidance branch),
         run in the kinetix tau-frame (tau = 1 - pi0_mem_time, v_tau = -v_t).
         """
-        observation = _model.preprocess_observation(None, observation, train=False)
+        observation = _model.preprocess_observation(
+            None, observation, train=False, image_keys=tuple(observation.images)
+        )
         batch_size = observation.state.shape[0]
         if noise is None:
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))

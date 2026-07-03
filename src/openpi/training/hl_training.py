@@ -113,3 +113,60 @@ def make_hl_batch_iterator(dataset, *, batch_size, rng: np.random.Generator, shu
         for start in range(0, n - batch_size + 1, batch_size):
             idx = order[start : start + batch_size]
             yield collate_hl([dataset[int(i)] for i in idx])
+
+
+def _decode_ids_to_text(tokenizer, ids) -> str:
+    clean = [int(x) for x in np.asarray(ids).tolist() if int(x) not in (0, 1)]  # drop PAD/EOS
+    if not clean:
+        return ""
+    try:
+        return tokenizer.decode(clean)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def evaluate_hl(model, dataset, tokenizer, *, batch_size, max_new_tokens, gen_examples, rng) -> dict:
+    """Held-out eval: teacher-forced CE over the dataset + generation metrics on a subset."""
+    from openpi.policies.mem_policy import MEMPolicy
+    from openpi.training.robomind_hl import collate_hl
+
+    model.eval()
+    n = len(dataset)
+
+    # --- CE loss over full batches (jitted forward keeps memory low). ---
+    ce_fn = nnx_utils.module_jit(model.compute_loss_hl)
+    ce_sum, ce_count = 0.0, 0
+    for start in range(0, n - batch_size + 1, batch_size):
+        obs_dict, tgt, mask = collate_hl([dataset[i] for i in range(start, start + batch_size)])
+        # collate_hl yields numpy; the eager generation path needs jax arrays for jaxtyping.
+        obs = jax.tree.map(jnp.asarray, _model.Observation.from_dict(obs_dict))
+        loss = ce_fn(rng, obs, jnp.asarray(tgt), jnp.asarray(mask))
+        ce_sum += float(jnp.sum(loss))
+        ce_count += int(loss.shape[0])
+    ce_loss = ce_sum / max(ce_count, 1)
+
+    # --- Generation metrics on the first `gen_examples`. ---
+    k = min(gen_examples, n)
+    sub_hits = mem_hits = tok_hits = tok_total = 0
+    start = 0
+    while start < k:
+        b = min(batch_size, k - start)
+        obs_dict, tgt, mask = collate_hl([dataset[i] for i in range(start, start + b)])
+        obs = jax.tree.map(jnp.asarray, _model.Observation.from_dict(obs_dict))
+        gen = np.asarray(model.predict_subtask_and_memory_cached(rng, obs, max_new_tokens=max_new_tokens))
+        for j in range(b):
+            gs, gm = MEMPolicy._parse_hl_output(_decode_ids_to_text(tokenizer, gen[j]))
+            ts, tm = MEMPolicy._parse_hl_output(_decode_ids_to_text(tokenizer, np.asarray(tgt[j])))
+            sub_hits += int(gs == ts)
+            mem_hits += int(gm == tm)
+            length = min(int(gen[j].shape[0]), int(np.asarray(mask[j]).sum()))
+            tok_hits += int(np.sum(np.asarray(gen[j])[:length] == np.asarray(tgt[j])[:length]))
+            tok_total += length
+        start += b
+    denom = max(k, 1)
+    return {
+        "ce_loss": ce_loss,
+        "subtask_exact_match": sub_hits / denom,
+        "memory_exact_match": mem_hits / denom,
+        "token_accuracy": tok_hits / max(tok_total, 1),
+    }

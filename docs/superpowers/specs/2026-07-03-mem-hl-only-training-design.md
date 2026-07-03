@@ -124,10 +124,14 @@ checkpoint manager, wandb, tqdm) but swaps the data path and loss:
   target_mask, train=True)` and means over the batch. Batch type is
   `(Observation, target_tokens, target_mask)` — distinct from `train.py`'s
   `(Observation, Actions)`.
-- **Freeze filter.** `Pi0MEMConfig(lora=True).get_freeze_filter()` — trains only LoRA
-  adapter params; base PaliGemma and the action expert are frozen (cast to bf16). The
-  action expert is additionally never in the `compute_loss_hl` graph, so it receives no
-  gradient regardless (matching the paper's stop-gradient).
+- **Freeze filter (strict LoRA-only).** Freeze **all** non-LoRA params —
+  `nnx.Not(PathRegex(".*lora.*"))` — so only the LLM LoRA adapters train; the base
+  PaliGemma LLM, the **SigLIP image encoder**, and the action expert are all frozen (cast
+  to bf16). Note: the default `Pi0MEMConfig(lora=True).get_freeze_filter()` would leave the
+  SigLIP image encoder fully trainable (it is not matched by its `.*llm.*` regex); we
+  deliberately do **not** use it, choosing the stricter LoRA-only scope. The action expert
+  is additionally never in the `compute_loss_hl` graph, so it receives no gradient
+  regardless (matching the paper's stop-gradient).
 - **Checkpoints / wandb.** Own checkpoint dir per arm; wandb `project_name="mem-hl-training"`.
 - **Evaluation** (periodic, every `eval_interval` steps):
   - **CE loss** on `dev_seen` and `dev_unseen` (teacher-forced `compute_loss_hl`, no grad).

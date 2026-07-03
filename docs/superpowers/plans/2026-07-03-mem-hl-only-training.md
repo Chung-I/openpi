@@ -12,9 +12,9 @@
 
 - **Isolation (do NOT touch):** `scripts/train.py`, any LL config in `src/openpi/training/config.py`, the video-encoder-eval configs, and the RLDS `DataConfig` machinery. All HL code is new files or the specific modifications named below (`robomind_hl.py`, `mem_policy.py`, `pi0_mem.py`).
 - **Branch:** all work on `mem-hl-training` in worktree `/home/chungyili/Codes/openpi-hl`. Verify with `git branch --show-current` → `mem-hl-training` before committing.
-- **Run tests with:** `uv run pytest <path> -v` from the worktree root. (First run may need `uv sync`; see Task 0.)
-- **XLA memory:** prefix GPU training/eval commands with `XLA_PYTHON_CLIENT_MEM_FRACTION=0.8`. Do not use gradient checkpointing.
-- **Finetune scope:** LoRA on PaliGemma only. Model config for real runs: `Pi0MEMConfig(pi05=True, action_dim=32, action_horizon=50, num_video_frames=6, paligemma_variant="gemma_2b", action_expert_variant="gemma_300m", lora=True)`. Freeze filter = `model_config.get_freeze_filter()`.
+- **Run unit tests with:** `CUDA_VISIBLE_DEVICES="" uv run pytest <path> -v` from the worktree root. This machine runs other GPU jobs — the dummy-model unit tests (Tasks 1-7) MUST be forced to CPU so JAX never grabs the shared GPU. (First run may need `uv sync`; see Task 0.)
+- **GPU smoke runs go to nano4, NOT this machine.** Any real-model run (Task 8's overfit gate on `gemma_2b`, Task 9's training) runs in the nano4 `openpi-hl` checkout, prefixed with `XLA_PYTHON_CLIENT_MEM_FRACTION=0.8`. Do not use gradient checkpointing.
+- **Finetune scope (strict LoRA-only):** LoRA on PaliGemma LLM only. Model config for real runs: `Pi0MEMConfig(pi05=True, action_dim=32, action_horizon=50, num_video_frames=6, paligemma_variant="gemma_2b", action_expert_variant="gemma_300m", lora=True)`. Freeze filter freezes **all non-LoRA params** = `nnx.Not(nnx_utils.PathRegex(".*lora.*"))` — the SigLIP image encoder and base LLM are frozen; only LLM LoRA adapters train. Do NOT use `get_freeze_filter()` (it would leave SigLIP trainable).
 - **Data on nano4 (read-only):** `/work/roboleon1295/openpi/data/robomind_hl_fr3` (train/dev, franka_3rgb) and `/work/roboleon1295/openpi/data/robomind_hl` (test, franka_1rgb). Each dir has `manifest.jsonl` + `frames/`.
 - **wandb:** `project_name="mem-hl-training"`. wandb is authenticated on the cluster; keep enabled for real runs, disabled in tests.
 - **Tokenizer:** `gs://big_vision/paligemma_tokenizer.model` via `openpi.shared.download.maybe_download(..., gs={"token": "anon"})`. EOS id = 1, PAD id = 0, BOS id = 2.
@@ -606,14 +606,16 @@ def test_two_arms_registered():
 
 
 def test_freeze_filter_trains_only_lora():
+    # Use nnx.eval_shape so we DON'T allocate a real ~2B gemma_2b model on CPU —
+    # the freeze/trainable filters are structural (path-based) and work on the
+    # abstract (ShapeDtypeStruct) module.
     cfg = config_hl.get_config("pi0_mem_hl_fr3_base")
-    model = cfg.model.create(jax.random.key(0))
-    trainable = nnx.state(model, cfg.trainable_filter)
-    flat = jax.tree_util.tree_leaves_with_path(nnx.to_pure_dict(trainable))
-    # Every trainable leaf path must contain "lora"; nothing else trains.
-    assert flat, "expected some trainable lora params"
-    for path, _ in flat:
-        assert "lora" in jax.tree_util.keystr(path)
+    abstract = nnx.eval_shape(lambda: cfg.model.create(jax.random.key(0)))
+    trainable = nnx.state(abstract, cfg.trainable_filter)
+    leaves = jax.tree_util.tree_leaves_with_path(trainable)
+    assert leaves, "expected some trainable lora params"
+    for path, _ in leaves:
+        assert "lora" in jax.tree_util.keystr(path), f"non-lora trainable param: {jax.tree_util.keystr(path)}"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -639,6 +641,7 @@ import flax.nnx as nnx
 import tyro
 
 import openpi.models.pi0_mem_config as pi0_mem_config
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
 
@@ -713,7 +716,9 @@ class HLTrainConfig:
 
     @property
     def freeze_filter(self) -> nnx.filterlib.Filter:
-        return self.model.get_freeze_filter()
+        # Strict LoRA-only: freeze every param whose path does NOT contain "lora"
+        # (base LLM + SigLIP image encoder + action expert all frozen).
+        return nnx.Not(nnx_utils.PathRegex(".*lora.*"))
 
     @property
     def trainable_filter(self) -> nnx.filterlib.Filter:
@@ -1261,14 +1266,12 @@ PY
 ```
 Expected: `import OK: True` (module imports without executing training).
 
-- [ ] **Step 3: Overfit-a-batch smoke run on the dummy config (CPU-safe, tiny)**
+- [ ] **Step 3: Note — real-model smoke run happens on nano4**
 
-This exercises the full loop end-to-end without cluster data. Add a temporary tiny debug config OR run on nano4 with real data at Task 9. For a local wiring check, run the overfit gate with a 5-step cap by editing `num_train_steps` via CLI override:
-```bash
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.8 uv run python scripts/train_hl.py pi0_mem_hl_fr3_base \
-  --overfit-batch --num-train-steps 5 --wandb-enabled False --fsdp-devices 1 2>&1 | tail -20
-```
-Expected: runs 5 steps and exits 0 (requires the fr3 data + splits present; on a machine without them, defer this step to Task 9's nano4 run and note it here).
+The `gemma_2b` real-model overfit smoke run needs a GPU and the fr3 data, both of which
+live on nano4 — and this machine runs other GPU jobs. So there is **no local GPU run**
+here; the real-model overfit-a-batch gate is Task 9 Step 4. Confirm only that Step 2's
+import smoke passed. Do not run `scripts/train_hl.py` locally against a real config.
 
 - [ ] **Step 4: Commit**
 

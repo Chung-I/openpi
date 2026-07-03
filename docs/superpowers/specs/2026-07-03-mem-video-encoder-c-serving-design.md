@@ -1,4 +1,4 @@
-# MEM Video-Encoder Eval — Sub-project C: MEM→RoboLab DROID serving + NCHC↔cml18 tunnel
+# MEM Video-Encoder Eval — Sub-project C: session-stateful MEM serving + tailscale (dev↔NCHC)
 
 **Date:** 2026-07-03
 **Status:** Design (approved for spec)
@@ -6,186 +6,198 @@
 sub-projects (A gate → B training → **C serving/tunnel** → D RoboLab eval → E wandb comparison).
 **Depends on:** Sub-project B (complete) — two trained checkpoints at step 9999:
 `/work/roboleon1295/openpi/checkpoints/pi0_mem_droid_k{6,1}_verify/pi0_mem_droid_k{6,1}_verify/9999`
-(each with `params` 6.6 GB + `assets` norm-stats + `train_state`).
+(each `params` 6.6 GB + `assets` norm-stats + `train_state`).
 
 ## Goal
 
-Make each trained arm's checkpoint answer RoboLab's `Pi0DroidJointposClient` over the network, so
-sub-project D can run Isaac-Sim evals on **cml18** against a model served on an **NCHC H200** —
-serving **one arm at a time** on the same endpoint.
+Serve each arm's checkpoint so RoboLab's Isaac-Sim eval (running **on this dev box's RTX 5090**)
+can drive it, with the model on an **NCHC H200**. Serve **one arm at a time** on the same endpoint,
+over a **tailscale** link (dev box ↔ NCHC compute node) — no cml18, no SSH relay.
 
 ## Context and key findings (drive the design)
 
-### F1 — The serving contract is standard pi0-DROID
+### F1 — RoboLab is multi-env, per-env, and expects a *client subclass* (not core edits)
 
-RoboLab's `Pi0DroidJointposClient` (`RoboLab/policies/pi0_family/client.py`) packs a request with
-exactly the keys openpi's DROID path expects and reads `response["actions"]`:
+RoboLab eval runs **32–128 parallel envs** (Isaac throughput report). `robolab/eval/base_client.py`
+`InferenceClient` is an explicit **subclass extension surface**: `infer(obs, instruction, *, env_id)`
+is per-env, the base owns per-env chunk caches (`_chunks`/`_counters`) and the **open-loop horizon**
+(pi05 → 15), and `reset(env_id)` is **already called per episode** (`episode.py:190`). Existing policy
+clients live in `policies/<family>/client.py` (`pi0_family`, `cosmos3`, `gr00t`, `dreamzero`). So the
+integration is a **new client subclass**, not a fork of RoboLab core.
 
-```python
-{ "observation/exterior_image_1_left": <224x224>, "observation/wrist_image_left": <224x224>,
-  "observation/joint_position": <7>, "observation/gripper_position": <1>, "prompt": <instruction> }
-```
+Because requests from 32 envs interleave with **no env identity on the wire by default**, a stateful
+video policy needs a **per-env session id**. `DreamZeroClient` (RoboLab's world-model client) is the
+precedent: it assigns a **`session_id` per `env_id`** (`"parallel envs must not share one or their
+histories get mixed"`), sends it in an **`endpoint`-tagged request envelope**, and on `reset` sends an
+`{"endpoint": "reset", "session_ids": [...]}` message to evict exactly those sessions.
 
-The client (via `robolab.eval.base_client.InferenceClient`) handles chunk caching and the
-**open-loop horizon** (pi05 → 15: it executes 15 actions of a returned chunk before re-querying),
-and thresholds the gripper dim in `_postprocess_chunk`. Our `action_horizon=16 ≥ 15`, so the chunk
-is long enough. This is the same contract `pi05_droid` serves.
+### F2 — Serve LL-only for DROID, but architect for HL+LL (stateful)
 
-### F2 — Serve LL-only (the HL head is untrained on DROID)
+DROID RLDS has no HL labels, so the B checkpoints trained the **low-level action head only**;
+`Pi0MEM`'s HL (`predict_subtask_and_memory`) is untrained → serve with **empty subtask/memory + the
+DROID `prompt` as goal + K video frames**. But the *full* MEM policy is inherently **stateful**:
+`MEMPolicy` carries per-episode `memory`, `subtask`, `step_count` (HL every `hl_interval_steps`) and
+`prev_action_chunk` (RTC). That state belongs **with the model** (only the server runs HL), so the
+server is stateful and **session-keyed**; DROID simply disables HL (`hl_interval_steps=∞`). The design
+is HL-ready without re-architecting.
 
-`DroidInputs` (`droid_policy.py`) produces **no** subtask/memory fields, and DROID RLDS carries no
-HL labels — so the B checkpoints trained the **low-level action head only**; `Pi0MEM`'s HL
-(`predict_subtask_and_memory`) is untrained and would emit garbage. Serving must run
-`sample_actions` with **empty subtask/memory + the DROID `prompt` as goal + the K video frames** —
-exactly the training regime. Consequence: we do **not** use `MEMPolicy`'s HL orchestration at all;
-the standard openpi `Policy.infer` path (which calls `module_jit(model.sample_actions)`,
-`policy.py:64,94`) already does the right thing once the obs carries the `video_*` keys.
+### F3 — Transport: tailscale, dev↔NCHC (measured constraints)
 
-### F3 — A rolling K-frame video buffer is the only serving-side statefulness
+Measured on a compute node (`25a-hgpn010`): **outbound SSH/22 to NTU is blocked** (`Connection timed
+out`), and the SSH relay would ride the nano4 login master (~1.7 MB/s, and saturating it reaps the
+master → 2FA re-auth). But **443 egress is fast** (GCS pulled 11.6 GB at ~380 MB/s). Since RoboLab runs
+on **this dev box** (not cml18), the link is **dev ↔ NCHC**, and **tailscale over 443** gives a direct,
+fast, uncapped path with no login master and no cml18:
 
-RoboLab sends one single-frame observation per query (no `video_*` keys). The K=6 arm's `video_img`
-encoder needs the last 6 frames; the K=1 arm needs 1. The server must buffer frames and synthesize
-the four `observation/video_*` keys (`video_exterior_image_1_left`, `video_wrist_image_left`,
-`video_joint_position`, `video_gripper_position`) that `DroidInputs` consumes (`droid_policy.py:52-110`).
-Because the client re-queries every open-loop horizon (~15 sim steps ≈ 1 s at 15 Hz), consecutive
-server queries are ~15 steps apart, which naturally matches the training `video_stride_frames=15`.
+- **Compute node:** `tailscaled --tun=userspace-networking` (no root; **inbound is forwarded to
+  `localhost`**), `tailscale up --authkey=… --hostname=nchc-mem-serve --ephemeral`; serve on
+  `127.0.0.1:$PORT`.
+- **This dev box:** already a tailnet peer; RoboLab connects to `nchc-mem-serve:$PORT` (MagicDNS) or
+  the `100.x` tailscale IP. Nothing else in the path.
 
 ## Design
 
-### Change 1 — `FrameBufferPolicy` (the only new openpi runtime code)
+### Change 1 — The request envelope (explicit `endpoint`, per-env `session_id`)
 
-A stateful wrapper around a standard trained `Policy`, in a new
-`src/openpi/policies/frame_buffer_policy.py`:
+A structured msgpack dict carried over openpi's stock `infer(dict) -> dict` transport (no bespoke wire
+protocol; the transport is schema-free):
 
-- **Construction:** `FrameBufferPolicy(policy: Policy, num_video_frames: int)` where `policy` is a
-  `create_trained_policy(config, ckpt_dir)` result. Holds rolling `collections.deque(maxlen=K)` for
-  exterior frames, wrist frames, joint_position, gripper_position.
-- **`infer(obs: dict) -> dict`** (matches `BasePolicy.infer`):
-  1. Append the current query's `observation/exterior_image_1_left`, `observation/wrist_image_left`,
-     `observation/joint_position`, `observation/gripper_position` to the deques.
-  2. Build the four `observation/video_*` keys by stacking the buffered frames into `[K, ...]`; when
-     fewer than K are buffered, **left-pad by repeating the oldest** so the shape is always `[K, ...]`.
-  3. Inject those four keys into a copy of `obs`, then return `self._policy.infer(obs_with_video)`.
-- **`reset()`** clears the deques (available for future episode-boundary handling; see Risks).
-- **K=1:** the deque holds 1 frame → the `video_*` keys carry the single current frame, matching the
-  K=1 training path (A-validated). **K=6:** last 6 queries.
-- No RTC, no HL. All model/transform/norm-stats machinery is inherited from the wrapped `Policy`.
+- **Infer:** `{ "endpoint": "infer", "session_id": <uuid>, "observation/exterior_image_1_left":
+  <224×224>, "observation/wrist_image_left": <224×224>, "observation/joint_position": <7>,
+  "observation/gripper_position": <1>, "prompt": <str> }` → response `{ "actions": <[16,8]> }`.
+- **Reset:** `{ "endpoint": "reset", "session_ids": [<uuid>, …] | null }` (null = all) → `{ "ok": true }`.
 
-### Change 2 — `scripts/serve_mem_droid.py`
+### Change 2 — `MemSessionPolicy` (new openpi server-side policy; stateful, session-keyed)
 
-Mirrors `scripts/serve_policy.py`: tyro `Args(config: str, ckpt_dir: str, port: int = 8000)`;
-`policy = create_trained_policy(get_config(config), ckpt_dir)`;
-`served = FrameBufferPolicy(policy, num_video_frames=config.model.num_video_frames)`;
-`websocket_policy_server.WebsocketPolicyServer(served, host="127.0.0.1", port=port).serve_forever()`.
-`num_video_frames` is read from the config so K is never hard-coded.
+New `src/openpi/policies/mem_session_policy.py` implementing `openpi_client.base_policy.BasePolicy`:
 
-### Change 3 — NCHC serving job + tunnel (`scripts/nchc/serve_mem_droid_nano4.sbatch`)
+- Holds one **shared** trained model + DROID input/output transforms + norm-stats (built via
+  `create_trained_policy(get_config(config), ckpt_dir)`; the wrapped `Policy` is reused for its
+  transform/`sample_actions` plumbing), and a `num_video_frames` (K) read from the config.
+- **`sessions: dict[str, _Session]`**, where `_Session = { frames: collections.deque(maxlen=K)
+  (exterior+wrist+state), mem: MEMPolicy(shared_model, cfg, hl_interval_steps=∞) }`. The per-session
+  `MEMPolicy` provides HL+LL orchestration + RTC state for free (HL disabled for DROID).
+- **`infer(request: dict) -> dict`** routes on `request["endpoint"]`:
+  - `"reset"`: `for sid in request["session_ids"] or list(sessions): sessions.pop(sid, None)`;
+    return `{"ok": True}`.
+  - `"infer"` (default): `sid = request["session_id"]`; get-or-create the session; append the current
+    frame to its deque; build the `observation/video_*` keys (`[K,…]`, left-pad by repeating the
+    oldest when < K); run the wrapped DROID input transforms → `Observation`; call
+    `session.mem.step(rng, observation)` (LL now; HL when enabled); apply output transforms; return
+    `{"actions": <[16,8]>}`.
+- Idle-session guard: an optional LRU/TTL cap on `sessions` to bound memory if a reset is ever missed
+  (evict least-recently-used beyond N sessions).
 
-`sbatch serve_mem_droid_nano4.sbatch <config> <ckpt_dir>` — 4 GPUs, `--partition=8gpus`,
+Served by a thin `scripts/serve_mem_session.py` (tyro `Args(config, ckpt_dir, port=8000)`):
+`MemSessionPolicy` handed to the **stock** `websocket_policy_server.WebsocketPolicyServer(policy,
+host="127.0.0.1", port=port)` — **no server/protocol change**; all statefulness lives in the policy.
+
+### Change 3 — `MemDroidJointposClient` (new RoboLab client subclass)
+
+New class in `RoboLab/policies/pi0_family/client.py`, subclassing `Pi0DroidJointposClient` (reuses its
+`openpi_client` websocket transport, connection/retry, and gripper `_postprocess_chunk`):
+
+- `_env_session_id: dict[int, str]`; `_extract_observation(raw, env_id)` lazily assigns
+  `uuid4()` per `env_id`.
+- `_pack_request(extracted, instruction)` adds `"session_id"` and `"endpoint": "infer"` to the pi0
+  request keys.
+- `reset(env_id)`: build the session-id list (this env, or all), send
+  `{"endpoint": "reset", "session_ids": …}` via the existing `self.client.infer(...)`, clear
+  `_env_session_id`, then `super().reset(env_id=env_id)`.
+- `open_loop_horizon` stays 15 (our `action_horizon=16 ≥ 15`).
+
+RoboLab core is untouched — this is the sanctioned `policies/<family>/` extension, alongside the
+existing clients.
+
+### Change 4 — NCHC serving job + tailscale (`scripts/nchc/serve_mem_session_nano4.sbatch`)
+
+`sbatch serve_mem_session_nano4.sbatch <config> <ckpt_dir>` — 4 GPUs, `--partition=8gpus`,
 `--time=4:00:00`, `--account=MST114563`, the proven nano4 env (`.venv` via `uv run --no-sync`,
 `HF_HOME=/work/roboleon1295/huggingface`, `TMPDIR`/`JAX_COMPILATION_CACHE_DIR` on `/work`,
-`CURL_CA_BUNDLE`=certifi, `XLA_PYTHON_CLIENT_MEM_FRACTION=0.8`). It:
+`CURL_CA_BUNDLE`=certifi, `XLA_PYTHON_CLIENT_MEM_FRACTION=0.8`). Steps:
 
-1. echoes `SLURMD_NODENAME` (the compute node, for the relay fallback);
-2. starts `serve_mem_droid.py` on `127.0.0.1:$PORT` (background); waits for the websocket
-   `/healthz`-style readiness (poll the port);
-3. **Primary tunnel:** `ssh -N -o BatchMode=yes -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes
-   -R $PORT:127.0.0.1:$PORT cml18` (compute node → cml18). Restart it in a loop if it drops.
-4. holds until the job's `--time` expires or it is cancelled.
+1. Stage the static tailscale binaries once under `/work/roboleon1295/tailscale/` (no root;
+   `pkgs.tailscale.com/stable/#static`).
+2. `tailscaled --tun=userspace-networking --state=/work/roboleon1295/ts.state
+   --socket=/work/roboleon1295/ts.sock &`
+3. `tailscale --socket=… up --authkey="$(cat /work/roboleon1295/.tailscale_authkey)"
+   --hostname=nchc-mem-serve --ephemeral`; wait for `tailscale status` = connected; print the
+   `100.x` IP.
+4. `uv run --no-sync python scripts/serve_mem_session.py <config> <ckpt_dir> --port $PORT` on
+   `127.0.0.1:$PORT`; hold until `--time` / cancellation.
 
-The **tunnel tier is chosen by a gating pre-test** (Change 4). If the primary is not viable, the job
-runs server-only (no `ssh -R`) and the **dev-box relay** (Change 5) is used instead.
+### Change 5 — Dev-box tailnet + RoboLab wiring (no fork)
 
-### Change 4 — Tunnel gating pre-test (decides primary vs fallback)
+This dev box is a tailnet peer (root here → normal TUN). RoboLab's eval launches
+`MemDroidJointposClient(remote_host="nchc-mem-serve", remote_port=$PORT, policy_variant="pi05")`
+(or the `100.x` tailscale IP). Config/launch only.
 
-A tiny `--partition=dev --gres=gpu:1 --time=00:05:00` job runs, **from a compute node**:
-`ssh -o BatchMode=yes -o ConnectTimeout=10 cml18 hostname`. Success ⇒ the **primary direct reverse
-tunnel** (Change 3 step 3) works. Failure (compute→NTU/22 blocked) ⇒ use the **dev-box relay**
-(Change 5). Recorded once; the serving sbatch then either includes or omits its `ssh -R` step.
+### Tailscale account setup (user does; I list it in the plan)
 
-### Change 5 — Dev-box relay fallback (`NCHC ↔ this box ↔ cml18`)
-
-The proven `transfer_checkpoint.sh` topology (this machine already reaches both NCHC via a
-persistent nano4 ControlMaster and cml18 via SSH). Orchestrated from **this dev box**, which the
-controller runs on, via two backgrounded SSH processes:
-
-1. **Pull** the compute-node server here through an internal jump:
-   `ssh -N -L $PORT:127.0.0.1:$PORT -J nano4 <compute-node>` (nano4→compute-node is internal cluster
-   SSH, available while our job holds that node; far more reliable than compute→internet). If
-   ProxyJump to the compute node is disallowed, the serving job instead opens an internal reverse
-   tunnel `ssh -R $PORT:127.0.0.1:$PORT nano4` and this box forwards `nano4:$PORT` locally.
-2. **Push** to cml18: `ssh -N -R $PORT:127.0.0.1:$PORT cml18`.
-
-RoboLab's side is **identical to the primary path** — it connects to `localhost:$PORT` on cml18
-either way.
-
-### Change 6 — RoboLab client wiring (no fork)
-
-On cml18, launch RoboLab's eval with
-`Pi0DroidJointposClient(remote_host="localhost", remote_port=$PORT, policy_variant="pi05")`.
-Config/launch only; RoboLab code is untouched. `open_loop_horizon` stays 15.
+1. Admin console → **Generate auth key** → **Reusable + Ephemeral** (+ pre-approved/tag if ACLs are
+   on). Save to `/work/roboleon1295/.tailscale_authkey`, `chmod 600` (never in git).
+2. Confirm this dev box is on the tailnet (`tailscale status`); enable **MagicDNS** so
+   `nchc-mem-serve` resolves (else use the printed IP).
 
 ## Data flow (serving one arm)
 
 ```
-RoboLab (cml18) --ws--> localhost:$PORT (cml18)
-   [ primary: ssh -R from compute node  |  fallback: this box bridges via -J nano4 + ssh -R cml18 ]
-      --> 127.0.0.1:$PORT (NCHC compute node) = websocket_policy_server
-            --> FrameBufferPolicy.infer(obs)
-                 → push frame to K-deque → build observation/video_* [K,...]
-                 → Policy.infer → DroidInputs → module_jit(Pi0MEM.sample_actions)  (LL; prompt=goal, empty HL, K video)
-                 → DroidOutputs → { "actions": [16, 8] }
+RoboLab eval (dev box, 32 envs on RTX 5090)
+  → MemDroidJointposClient.infer(obs, instr, env_id)     [per-env session_id, endpoint="infer"]
+     → openpi_client websocket ── tailscale/443 ──▶ nchc-mem-serve:$PORT (NCHC compute node)
+          websocket_policy_server → MemSessionPolicy.infer(request)
+             route "infer": session[sid].frames.append(frame) → build observation/video_* [K,…]
+                → DROID input transforms → MEMPolicy.step (LL; HL off) → DROID output transforms
+             → { "actions": [16,8] }
+  (episode end) client.reset(env_id) → {"endpoint":"reset","session_ids":[…]} → evict those sessions
 ```
 
 ## Testing / definition of done
 
-### Committed unit test (CPU, dummy/tiny MEM), `frame_buffer_policy_test.py`
+### Committed openpi unit test — `mem_session_policy_test.py` (CPU, dummy/tiny MEM)
 
-- **T-C1 — buffer shapes + delegation.** Feed a stream of synthetic single-frame DROID obs dicts
-  through `FrameBufferPolicy` wrapping a stub policy that records the obs it received; assert the
-  injected `observation/video_*` keys have leading dim **K** for both K=1 and K=6, that fewer-than-K
-  history left-pads (repeats oldest), and that the wrapped policy is called once per `infer`. With a
-  real dummy `Pi0MEM` Policy: one `infer` returns finite actions of shape `[16, 8]`.
+- **T-C1 — routing + session isolation.** Drive `MemSessionPolicy` with a stub/dummy model: two
+  interleaved `session_id`s each get an independent K-frame buffer (frames never cross sessions);
+  fewer-than-K history left-pads; a `{"endpoint":"reset","session_ids":[sid_a]}` evicts only `sid_a`;
+  an `"infer"` returns finite actions of shape `[16, 8]` for K=1 and K=6.
 
-### On-NCHC smokes (operator/controller steps)
+### On-NCHC + dev-box smokes (controller steps — I can run both, RoboLab is here)
 
-- **Local same-node smoke:** serve the K1 checkpoint on `127.0.0.1:$PORT`; from the same node, an
-  `openpi_client` websocket request with a synthetic DROID obs returns a well-formed `[16,8]` chunk.
-  (Verifies the standard `Policy` path drives `Pi0MEM.sample_actions` — the "shim?" risk.)
-- **Tunnel gating pre-test** (Change 4) result recorded.
-- **Tunnel smoke from cml18:** a synthetic `Pi0DroidJointposClient` request through the chosen tunnel
-  returns actions.
+- **Local same-node smoke (NCHC):** serve K1; from the same node an `openpi_client` request with the
+  envelope returns a well-formed `[16,8]` chunk (verifies the `MEMPolicy.step` / transform path).
+- **Tailscale reachability:** from this dev box, `nc`/`openpi_client` hits `nchc-mem-serve:$PORT` and
+  gets metadata + an inference response.
+- **End-to-end from RoboLab:** a short `MemDroidJointposClient` run (few envs, few steps) against the
+  NCHC-served K1 checkpoint returns valid action chunks and `reset()` cleanly evicts sessions.
 
 ### Done when
 
-A `Pi0DroidJointposClient` on cml18 receives valid `[16,8]` action chunks from **each** arm's
-step-9999 checkpoint served on NCHC (K6 then K1 on the same `$PORT`).
+`MemDroidJointposClient` on the dev box gets valid `[16,8]` action chunks (and clean per-episode
+resets) from **each** arm's step-9999 checkpoint served on NCHC over tailscale (K6 then K1, same port).
 
 ## Non-goals (later sub-projects)
 
 - RoboLab simple-tier subset selection and eval runs (**D**).
 - Parsing RoboLab output → wandb comparison (**E**).
-- Inference-time RTC (`sample_actions_rtc` exists but is out of scope here).
-- Any RoboLab code change; overlay-network (tailscale) tunneling (evaluated, dropped for SSH).
+- Training-time RTC; enabling HL (needs an HL-trained checkpoint) — architecture is ready, not wired on.
+- Any RoboLab **core** change (only the sanctioned `policies/` client subclass is added).
 
 ## Risks / open items
 
-- **compute→NTU/22 blocked** ⇒ primary direct tunnel unavailable → dev-box relay (gated by Change 4;
-  no wasted GPU time — the pre-test is a 5-min `dev` job).
-- **`Pi0MEM.sample_actions` via the standard `Policy`** may need a small adapter (e.g. a
-  `sample_kwargs` such as `num_steps`) → caught by the local same-node smoke before any tunnel work.
-- **K=6 episode-start staleness:** with no reset signal in the websocket contract, the first ~K
-  queries of each RoboLab episode carry stale buffered frames from the prior episode (~K×15 sim
-  steps). Accepted for a "get-a-feel" eval; K=1 is unaffected. `FrameBufferPolicy.reset()` exists if
-  D later wires an episode boundary.
-- **Tunnel drops during a long eval** → `ssh` with `ServerAliveInterval=30 -o ExitOnForwardFailure`
-  in a restart loop (autossh-style).
-- **ProxyJump to a compute node disallowed** (relay path) → serving job opens an internal reverse
-  tunnel to nano4 instead; this box forwards from there.
+- **Tailscale userspace inbound lag:** inbound TCP can trail `tailscale up` by a few seconds → the
+  sbatch waits for `tailscale status` = connected and the serving job self-checks before use.
+- **`MEMPolicy.step` on the serving path** may need a small adapter (rng handling, `num_steps`) → the
+  local same-node smoke catches it before any tailscale work.
+- **Session lifecycle:** a missed `reset` would leak a session → the LRU/TTL cap bounds memory; the
+  per-episode `reset(env_id)` (already called by RoboLab) is the primary cleanup.
+- **K=6 stride at inference:** the client re-queries every ~15 sim steps (open-loop 15) → the per-env
+  buffer captures ~stride-15 history, matching training `video_stride_frames=15`.
+- **Ephemeral-key secrecy:** auth key lives only in `/work/.../.tailscale_authkey` (chmod 600), never
+  committed.
 
 ## Relation to the umbrella experiment
 
-A proved the K=1 baseline; B produced the two checkpoints; **C** (this spec) makes them reachable
-from cml18. **D** runs the RoboLab simple-tier subset (~30 min/eval) per arm against this endpoint.
-**E** parses RoboLab output into wandb for the K=1-vs-K=6 comparison. Each is its own
+A proved the K=1 baseline; B produced the two checkpoints; **C** (this spec) serves them to RoboLab on
+the dev box over tailscale. **D** runs the RoboLab simple-tier subset (~30 min/eval) per arm against
+this endpoint. **E** parses RoboLab output into wandb for the K=1-vs-K=6 comparison. Each is its own
 spec → plan → implementation cycle.

@@ -116,7 +116,16 @@ def make_hl_batch_iterator(dataset, *, batch_size, rng: np.random.Generator, shu
 
 
 def _decode_ids_to_text(tokenizer, ids) -> str:
-    clean = [int(x) for x in np.asarray(ids).tolist() if int(x) not in (0, 1)]  # drop PAD/EOS
+    # Truncate at the FIRST EOS (batched greedy decode over-generates past per-example EOS);
+    # skip PAD. Keeping post-EOS tokens would corrupt the parsed memory field.
+    clean = []
+    for x in np.asarray(ids).tolist():
+        x = int(x)
+        if x == 1:  # EOS -> stop
+            break
+        if x == 0:  # PAD -> skip
+            continue
+        clean.append(x)
     if not clean:
         return ""
     try:

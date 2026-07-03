@@ -10,9 +10,10 @@
 
 The RoboMIND HL data assembler and the `RobomindHLDataset` → `Observation` transform
 (`src/openpi/training/robomind_hl.py`) exist and are tested offline, but nothing wires
-them into a training loop. `Pi0MEM.compute_loss_hl` (next-token cross-entropy on
-`<subtask>..</subtask><memory>..</memory>` text) is implemented and unit-tested, but has
-never been driven by an optimizer over real data.
+them into a training loop. `Pi0MEM.compute_loss_hl` (next-token cross-entropy on the serialized subtask+memory text)
+is implemented and unit-tested, but has never been driven by an optimizer over real data.
+This project also refines two details of that existing implementation — the target
+serialization format (§5.1) and the generation-eval decode path (§5.2) — motivated below.
 
 This project builds a **testing/debugging harness for HL-only training**: a small,
 iterable loop that finetunes the high-level policy on RoboMIND Franka data and reports
@@ -40,6 +41,9 @@ paper's joint recipe, documented here so the divergence is explicit.
 - A dedicated `scripts/train_hl.py` that optimizes `compute_loss_hl` over
   `RobomindHLDataset`, reusing openpi's mesh/FSDP/checkpoint/wandb scaffolding.
 - LoRA finetune of the PaliGemma VLM; action expert frozen.
+- Switch the HL target serialization from XML-style tags to a natural-language framing
+  (§5.1), and give the HL policy a faithful KV-cache greedy decode for generation eval
+  (§5.2).
 - Episode-grouped, task-level train/dev split with two dev slices; franka_1rgb as test.
 - Two comparison arms: init from `pi05_base` vs `pi05_droid`.
 - First-class debugging signals: overfit-a-batch gate, dev CE curves, generation-quality
@@ -52,6 +56,10 @@ paper's joint recipe, documented here so the divergence is explicit.
 - Full-backbone (non-LoRA) finetune (may follow later; not now).
 - Production-scale training or hyperparameter sweeps beyond the two init arms.
 - Any change to `scripts/train.py`, LL configs, or `DataConfig`/RLDS machinery.
+- Serving the HL policy under vLLM. vLLM would require exporting the LoRA-adapted
+  PaliGemma to HF format and reconstructing the MEM-specific HL prefix (image + memory
+  tokens + goal) in vLLM's PaliGemma path — high effort and a fidelity risk that can
+  invalidate eval. Out of scope; see §5.2 for why in-graph decode is used instead.
 
 ## 3. Background: dataset semantics
 
@@ -123,12 +131,46 @@ checkpoint manager, wandb, tqdm) but swaps the data path and loss:
 - **Checkpoints / wandb.** Own checkpoint dir per arm; wandb `project_name="mem-hl-training"`.
 - **Evaluation** (periodic, every `eval_interval` steps):
   - **CE loss** on `dev_seen` and `dev_unseen` (teacher-forced `compute_loss_hl`, no grad).
-  - **Generation metrics** on a fixed dev subset via `predict_subtask_and_memory`
-    (greedy decode): subtask exact-match, memory exact-match, and token-level accuracy.
-    Parsed with the same `<subtask>/<memory>` delimiters the training targets use.
+  - **Generation metrics** on a fixed dev subset via the KV-cache greedy decode (§5.2):
+    subtask exact-match, memory exact-match, and token-level accuracy. Parsed with the
+    same NL separators the training targets use (§5.1).
   - Logged to wandb as `dev_seen/*` and `dev_unseen/*`; the seen−unseen gap is the
     memorization-vs-generalization readout.
   - **Test** eval (same metrics on franka_1rgb) runs once at the end of each arm.
+
+### 5.1 HL target serialization (natural-language framing)
+
+The current format wraps the target in XML-style tags
+(`<subtask>..</subtask><memory>..</memory>`). Under the PaliGemma SentencePiece tokenizer
+these tags are **not** special tokens — `piece_to_id("<subtask>")` returns the `unk` id —
+so each tag is shredded into subword pieces (`<`, `sub`, `task`, `>`), producing
+off-distribution merges (`'><'`, `')</'`) and ~35% delimiter-token overhead (a short
+target: 23 tokens tagged vs 17 in NL). For a small LoRA finetune, staying near the VLM's
+language prior matters, so we **switch to a natural-language framing**, e.g.:
+
+```
+Subtask: <target_subtask>. Memory: <target_memory>.<eos>
+```
+
+This is applied at load time in `robomind_hl.py` (`HL_TARGET_TEMPLATE`), so **no
+re-assembly** is needed — the manifest already stores `target_subtask`/`target_memory`
+separately. The change is a matched pair: update the template **and** the inference parser
+(`openpi.policies.mem_policy.MEMPolicy._parse_hl_output`), plus a round-trip test
+(`format(subtask, memory)` → parse → recovers both). The separator must be robust: memory
+is emitted last and the `Subtask:`/`Memory:` markers are unlikely to appear inside the
+field values; the exact separator is finalized with the round-trip test.
+
+### 5.2 Generation eval decode (in-graph KV-cache, not vLLM)
+
+`predict_subtask_and_memory` currently re-runs the full prefix+generated forward every
+step (O(T²)) — that recompute, not the absence of vLLM, is the cost. openpi already has
+KV-cache autoregressive decoding: `gemma.py` supports `__call__(..., kv_cache)` +
+`decode_logits`, and `pi0_mem.sample_actions` fills a prefix KV cache once and steps
+token-by-token. We add a **KV-cache greedy decode for HL text** that reuses that exact
+`gemma.llm` graph: fill the prefix cache from `embed_prefix_hl`, then decode one token at a
+time against the cache until `<eos>` / `max_new_tokens`. This is bit-faithful to training
+and needs no weight export. Faithfulness is pinned by an equivalence test: KV-cache decode
+== the naive loop on a small fixed input (see §9).
 
 ## 6. Configuration
 
@@ -190,14 +232,23 @@ The two threads are cleanly separated by branch; the risk is a shared mutable wo
 - Unit test: split builder — given a synthetic manifest, assert (a) no `episode_id`
   appears in two slices, (b) `dev_unseen` tasks are absent from `train`, (c) determinism
   under fixed seed.
+- Unit test: NL target round-trip — `HL_TARGET_TEMPLATE.format(subtask, memory)` parsed by
+  `_parse_hl_output` recovers `(subtask, memory)` exactly, including tricky values
+  (punctuation, empty memory).
+- Unit test: KV-cache decode equivalence — the KV-cache HL decode produces the same token
+  sequence as the naive `predict_subtask_and_memory` loop on a small fixed input (dummy
+  Pi0MEM variant).
 - Reuse existing `robomind_hl_test.py` coverage for the dataset/collate transform.
 
 ## 10. Risks & open questions
 
 - **Test-set narrowness.** franka_1rgb is only 2 bread tasks; strong test numbers reflect
   bread-family + embodiment transfer, not broad generalization. Interpret accordingly.
-- **Generation eval cost.** `predict_subtask_and_memory` is a Python-loop greedy decode
-  (no KV cache); run it on a small fixed dev subset and at a coarse cadence.
+- **NL parsing robustness.** The NL framing (§5.1) is slightly less bulletproof than tag
+  delimiters; mitigated by emitting memory last and by the round-trip test. If a robust
+  separator proves awkward, a single rare literal delimiter remains a fallback.
+- **Generation eval cost.** Addressed by the in-graph KV-cache decode (§5.2); still run on
+  a small fixed dev subset at a coarse cadence since decode is inherently sequential.
 - **Task canonicalization correctness** — verified by inspection before freezing splits
   (§4).
 - **Frame I/O throughput.** ~69k small frames on `/work`; if I/O-bound, raise loader

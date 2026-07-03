@@ -69,3 +69,23 @@ def test_reset_all():
     sp.infer({"endpoint": "infer", "session_id": "B", **_frame(1)})
     sp.infer({"endpoint": "reset", "session_ids": None})
     assert len(sp._sessions) == 0
+
+
+def test_lru_evicts_least_recently_used():
+    sp = MemSessionPolicy(_StubPolicy(), num_video_frames=2, max_sessions=2)
+    sp.infer({"endpoint": "infer", "session_id": "A", **_frame(1)})
+    sp.infer({"endpoint": "infer", "session_id": "B", **_frame(1)})
+    sp.infer({"endpoint": "infer", "session_id": "C", **_frame(1)})
+    assert len(sp._sessions) == 2
+    assert "A" not in sp._sessions          # oldest evicted
+    assert "B" in sp._sessions and "C" in sp._sessions
+
+
+def test_lru_move_to_end_on_access():
+    sp = MemSessionPolicy(_StubPolicy(), num_video_frames=2, max_sessions=2)
+    sp.infer({"endpoint": "infer", "session_id": "A", **_frame(1)})
+    sp.infer({"endpoint": "infer", "session_id": "B", **_frame(1)})
+    sp.infer({"endpoint": "infer", "session_id": "A", **_frame(1)})  # touch A -> most-recently-used
+    sp.infer({"endpoint": "infer", "session_id": "C", **_frame(1)})
+    assert "B" not in sp._sessions          # B is now LRU, evicted
+    assert "A" in sp._sessions and "C" in sp._sessions

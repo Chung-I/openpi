@@ -13,6 +13,7 @@ import pathlib
 import sys
 import types
 
+import etils.epath as epath
 import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
@@ -64,7 +65,8 @@ def _to_obs_batch(collated):
 
 def main(config: config_hl.HLTrainConfig, *, overfit_batch: bool = False):
     logging.basicConfig(level=logging.INFO)
-    jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+    # Use a writable, persistent cache dir (compute nodes may have a non-writable /tmp).
+    jax.config.update("jax_compilation_cache_dir", str(epath.Path("~/.cache/jax").expanduser()))
     mesh = sharding.make_mesh(config.fsdp_devices)
     rng = jax.random.key(config.seed)
     train_rng, init_rng = jax.random.split(rng)

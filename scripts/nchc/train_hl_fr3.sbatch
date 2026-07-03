@@ -13,7 +13,8 @@
 set -x
 cd /work/roboleon1295/openpi-hl                     # isolated HL worktree/checkout on nano4
 export HF_HOME=/work/roboleon1295/hf_cache
-mkdir -p logs splits
+export TMPDIR=/work/roboleon1295/tmp                # compute-node /tmp is not writable (XLA PTX scratch)
+mkdir -p logs splits "$TMPDIR"
 
 # Build the shared split once (idempotent; both arms read it).
 uv run python scripts/build_hl_splits.py \

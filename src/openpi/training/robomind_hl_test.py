@@ -99,3 +99,21 @@ def test_dataset_and_collate_to_observation(tmp_path):
     assert float(img.max()) <= 1.0
     assert obs.tokenized_memory is not None
     assert obs.tokenized_prompt is not None
+
+
+def test_dataset_episode_filter(tmp_path):
+    rows = [
+        {"episode_id": "h5/241021_taskA_0/s/train/x", **_row("frames/a.jpg")},
+        {"episode_id": "h5/241021_taskB_0/s/train/x", **_row("frames/b.jpg")},
+    ]
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    ds_all = hl.RobomindHLDataset(manifest, tmp_path, _FakeTok())
+    assert len(ds_all) == 2
+
+    ds_a = hl.RobomindHLDataset(
+        manifest, tmp_path, _FakeTok(), episode_ids={"h5/241021_taskA_0/s/train/x"}
+    )
+    assert len(ds_a) == 1
+    assert ds_a.rows[0]["episode_id"] == "h5/241021_taskA_0/s/train/x"

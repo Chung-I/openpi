@@ -113,6 +113,7 @@ class RobomindHLDataset:
         frames_dir,
         tokenizer: _Tokenizer,
         *,
+        episode_ids: set[str] | None = None,
         state_dim: int = 32,
         max_prompt_tokens: int = 48,
         max_memory_tokens: int = 128,
@@ -126,7 +127,10 @@ class RobomindHLDataset:
             "max_memory_tokens": max_memory_tokens,
             "max_target_tokens": max_target_tokens,
         }
-        self.rows = [json.loads(line) for line in pathlib.Path(manifest_path).read_text().splitlines() if line.strip()]
+        rows = [json.loads(line) for line in pathlib.Path(manifest_path).read_text().splitlines() if line.strip()]
+        if episode_ids is not None:
+            rows = [r for r in rows if r["episode_id"] in episode_ids]
+        self.rows = rows
 
     def __len__(self) -> int:
         return len(self.rows)

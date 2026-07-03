@@ -64,7 +64,7 @@ def _to_obs_batch(collated):
 
 
 def main(config: config_hl.HLTrainConfig, *, overfit_batch: bool = False):
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, force=True)  # force: openpi imports pre-config the root logger
     # Use a writable, persistent cache dir (compute nodes may have a non-writable /tmp).
     jax.config.update("jax_compilation_cache_dir", str(epath.Path("~/.cache/jax").expanduser()))
     mesh = sharding.make_mesh(config.fsdp_devices)

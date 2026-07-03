@@ -80,17 +80,19 @@ New `src/openpi/policies/mem_session_policy.py` implementing `openpi_client.base
 - Holds one **shared** trained model + DROID input/output transforms + norm-stats (built via
   `create_trained_policy(get_config(config), ckpt_dir)`; the wrapped `Policy` is reused for its
   transform/`sample_actions` plumbing), and a `num_video_frames` (K) read from the config.
-- **`sessions: dict[str, _Session]`**, where `_Session = { frames: collections.deque(maxlen=K)
-  (exterior+wrist+state), mem: MEMPolicy(shared_model, cfg, hl_interval_steps=∞) }`. The per-session
-  `MEMPolicy` provides HL+LL orchestration + RTC state for free (HL disabled for DROID).
+- **`sessions: OrderedDict[str, deque(maxlen=K)]`** of per-session K-frame buffers (LRU-capped).
 - **`infer(request: dict) -> dict`** routes on `request["endpoint"]`:
   - `"reset"`: `for sid in request["session_ids"] or list(sessions): sessions.pop(sid, None)`;
     return `{"ok": True}`.
-  - `"infer"` (default): `sid = request["session_id"]`; get-or-create the session; append the current
-    frame to its deque; build the `observation/video_*` keys (`[K,…]`, left-pad by repeating the
-    oldest when < K); run the wrapped DROID input transforms → `Observation`; call
-    `session.mem.step(rng, observation)` (LL now; HL when enabled); apply output transforms; return
-    `{"actions": <[16,8]>}`.
+  - `"infer"` (default): `sid = request["session_id"]`; get-or-create the session buffer; append the
+    current frame; build the `observation/video_*` keys (`[K,…]`, left-pad by repeating the oldest
+    when < K); inject them into the obs and **delegate to the shared `Policy.infer`** (its DROID input
+    transforms + `Pi0MEM.sample_actions` handle the rest); return `{"actions": <[16,8]>}`.
+- **HL-ready (LL-only realized):** for DROID the HL head is untrained, and `MEMPolicy(hl_interval=∞,
+  use_rtc=False).step` reduces to `sample_actions` — so the LL path is served via the shared standard
+  `Policy` (proven in B). To enable HL later (HL-trained checkpoint), swap the shared `Policy` for a
+  **per-session `MEMPolicy`** here; the session buffer + routing are unchanged. Documented as the
+  extension point, not built now (YAGNI).
 - Idle-session guard: an optional LRU/TTL cap on `sessions` to bound memory if a reset is ever missed
   (evict least-recently-used beyond N sessions).
 

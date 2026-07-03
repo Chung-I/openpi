@@ -170,18 +170,17 @@ class MEMPolicy:
     def _parse_hl_output(text: str) -> tuple[str, str]:
         """Extract subtask and memory from HL output text.
 
-        Expected format (XML-like tags)::
+        Expected format (natural language)::
 
-            <subtask>pick up the cup</subtask><memory>already opened the drawer</memory>
+            Subtask: pick up the cup Memory: already opened the drawer
 
-        Returns:
-            (subtask, memory) — both default to "" if the tag is absent.
+        Memory is emitted last; we split on the first ``Memory:`` marker after the
+        ``Subtask:`` marker. Returns ("", "") if the markers are absent.
         """
-        subtask_match = re.search(r"<subtask>(.*?)</subtask>", text, re.DOTALL)
-        memory_match = re.search(r"<memory>(.*?)</memory>", text, re.DOTALL)
-        subtask = subtask_match.group(1).strip() if subtask_match else ""
-        memory = memory_match.group(1).strip() if memory_match else ""
-        return subtask, memory
+        m = re.search(r"Subtask:\s*(.*?)\s*Memory:\s*(.*)\Z", text, re.DOTALL)
+        if not m:
+            return "", ""
+        return m.group(1).strip(), m.group(2).strip()
 
     def _build_observation(
         self,

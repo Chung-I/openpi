@@ -28,7 +28,7 @@ import numpy as np
 
 # Camera key the HL branch reads (single-frame o_t). RoboMIND camera_top -> base_0_rgb.
 HL_CAMERA = "base_0_rgb"
-HL_TARGET_TEMPLATE = "<subtask>{subtask}</subtask><memory>{memory}</memory>"
+HL_TARGET_TEMPLATE = "Subtask: {subtask} Memory: {memory}"
 _PADDING_TOKEN_ID = 0
 _EOS_TOKEN_ID = 1  # PaliGemma / Gemma SentencePiece EOS
 

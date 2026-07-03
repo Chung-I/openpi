@@ -1,8 +1,10 @@
 import jax
 import jax.numpy as jnp
+import pytest
 
 from openpi.models.pi0_mem_config import Pi0MEMConfig
 from openpi.policies.mem_policy import MEMPolicy
+from openpi.training.robomind_hl import HL_TARGET_TEMPLATE
 
 
 def test_mem_policy_step():
@@ -163,3 +165,30 @@ def test_mem_policy_no_rtc_never_calls_rtc():
     policy.step(key, obs)
     assert "rtc" not in fake.calls
     assert "plain" in fake.calls
+
+
+@pytest.mark.parametrize(
+    ("subtask", "memory"),
+    [
+        ("move towards the lid of the trash bin", "(none yet)"),
+        ("pick up the red block", "already opened the drawer; grasp failed once"),
+        ("place bread on the table", ""),
+        ("push the drawer closed.", "cabinet: closed. drawer: open"),
+    ],
+)
+def test_nl_target_round_trip(subtask, memory):
+    text = HL_TARGET_TEMPLATE.format(subtask=subtask, memory=memory)
+    parsed_subtask, parsed_memory = MEMPolicy._parse_hl_output(text)
+    assert parsed_subtask == subtask.strip()
+    assert parsed_memory == memory.strip()
+
+
+def test_target_format_is_natural_language():
+    """Pin the serialization to NL (no XML tags) — the reason for this change."""
+    text = HL_TARGET_TEMPLATE.format(subtask="pick up cup", memory="drawer open")
+    assert "<subtask>" not in text and "<memory>" not in text
+    assert text == "Subtask: pick up cup Memory: drawer open"
+
+
+def test_parse_missing_fields_returns_empty():
+    assert MEMPolicy._parse_hl_output("garbage with no markers") == ("", "")

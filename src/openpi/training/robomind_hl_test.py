@@ -63,7 +63,7 @@ def test_build_hl_example(tmp_path):
     assert ex["tokenized_prompt"].shape == (16,)
     assert ex["tokenized_memory"].shape == (32,)
     assert ex["target_tokens"].shape == (128,)
-    # target is the <subtask>..</subtask><memory>..</memory> format, EOS-terminated
+    # target is the "Subtask: .. Memory: .." NL format, EOS-terminated
     tok = _FakeTok()
     expected = hl.HL_TARGET_TEMPLATE.format(subtask="move towards the lid", memory="I moved towards the lid.")
     exp_ids = [*tok.encode(expected), hl._EOS_TOKEN_ID]  # noqa: SLF001

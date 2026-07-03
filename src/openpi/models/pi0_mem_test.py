@@ -98,6 +98,18 @@ def test_pi0_mem_hl_loss():
     assert jnp.all(jnp.isfinite(loss))
 
 
+def test_kv_cache_decode_matches_naive():
+    key = jax.random.key(0)
+    config = Pi0MEMConfig(paligemma_variant="dummy", action_expert_variant="dummy")
+    model = config.create(key)
+    obs = config.fake_obs(2)
+
+    naive = model.predict_subtask_and_memory(key, obs, max_new_tokens=8)
+    cached = model.predict_subtask_and_memory_cached(key, obs, max_new_tokens=8)
+    assert naive.shape == cached.shape
+    assert jnp.array_equal(naive, cached)
+
+
 def test_pi0_mem_combined_loss():
     key = jax.random.key(0)
     config = Pi0MEMConfig(

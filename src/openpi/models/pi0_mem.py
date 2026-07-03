@@ -420,6 +420,50 @@ class Pi0MEM(_model.BaseModel):
         # Return generated tokens, stripping the leading BOS token
         return generated[:, 1:]
 
+    def predict_subtask_and_memory_cached(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        *,
+        max_new_tokens: int = 64,
+    ) -> at.Int[at.Array, "b t"]:
+        """KV-cache greedy decode of subtask+memory text (O(T), faithful to the naive loop).
+
+        Fills the HL prefix KV cache once, then decodes token-by-token feeding only the
+        newest token against the cache. Returns generated ids with the leading BOS stripped.
+        Bit-equivalent to predict_subtask_and_memory (see pi0_mem_test).
+        """
+        observation = _model.preprocess_observation(None, observation, train=False)
+        batch_size = observation.state.shape[0]
+
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix_hl(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=prefix_positions)
+
+        # Number of real (non-padding) prefix tokens per row.
+        n_prefix = jnp.sum(prefix_mask, axis=1)  # [b]
+        cur = jnp.full((batch_size, 1), _PALIGEMMA_BOS_TOKEN_ID, dtype=jnp.int32)
+        generated = cur
+
+        for i in range(max_new_tokens):
+            tok_emb = self.PaliGemma.llm(cur, method="embed")  # [b, 1, d]
+            positions = (n_prefix + i)[:, None]  # [b, 1] absolute position of this token
+            # Attend to all real prefix tokens + the i already-cached generated tokens + itself.
+            step_mask = jnp.concatenate(
+                [prefix_mask, jnp.ones((batch_size, i + 1), dtype=jnp.bool_)], axis=1
+            )[:, None, :]  # [b, 1, prefix_len + i + 1]
+            (out, _), kv_cache = self.PaliGemma.llm(
+                [tok_emb, None], positions=positions, mask=step_mask, kv_cache=kv_cache
+            )
+            logits = self.PaliGemma.llm(out, method="decode_logits")  # [b, 1, vocab]
+            cur = jnp.argmax(logits[:, 0, :], axis=-1, keepdims=True).astype(jnp.int32)
+            generated = jnp.concatenate([generated, cur], axis=1)
+            if jnp.all(cur == _PALIGEMMA_EOS_TOKEN_ID):
+                break
+
+        return generated[:, 1:]
+
     @at.typecheck
     def compute_loss_fast(
         self,

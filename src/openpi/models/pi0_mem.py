@@ -465,6 +465,8 @@ class Pi0MEM(_model.BaseModel):
         logits = self.PaliGemma.llm(prefix_out[:, -1:, :], method="decode_logits")
         cur = jnp.argmax(logits[:, 0, :], axis=-1, keepdims=True).astype(jnp.int32)
         generated = cur
+        if jnp.all(cur == _PALIGEMMA_EOS_TOKEN_ID):  # match the naive loop's per-token EOS check
+            return generated
 
         for i in range(max_new_tokens - 1):
             tok_emb = self.PaliGemma.llm(cur, method="embed")  # embed target[i]

@@ -45,7 +45,10 @@ def load_paligemma_sp() -> _Tokenizer:
 
     path = download.maybe_download("gs://big_vision/paligemma_tokenizer.model", gs={"token": "anon"})
     with path.open("rb") as f:
-        return sentencepiece.SentencePieceProcessor(model_proto=f.read())
+        sp = sentencepiece.SentencePieceProcessor(model_proto=f.read())
+    # Guard the foundational SEP constant used by the HL prefix (pi0_mem._PALIGEMMA_SEP_TOKEN_ID).
+    assert sp.encode("\n") == [108], f"unexpected '\\n' token id: {sp.encode(chr(10))} (expected [108])"
+    return sp
 
 
 def _encode(tokenizer: _Tokenizer, text: str, max_len: int, *, add_eos: bool = False) -> tuple[np.ndarray, np.ndarray]:

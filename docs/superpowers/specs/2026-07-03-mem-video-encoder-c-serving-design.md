@@ -55,6 +55,12 @@ fast, uncapped path with no login master and no cml18:
 - **This dev box:** already a tailnet peer; RoboLab connects to `nchc-mem-serve:$PORT` (MagicDNS) or
   the `100.x` tailscale IP. Nothing else in the path.
 
+**Validated end-to-end (2026-07-03):** a compute node (`25a-hgpn027`) joined the tailnet in userspace
+mode over 443 as `nchc-mem-serve`; from this dev box, `tailscale ping` returned pong via **DERP(hkg)
+~48 ms** (direct UDP NAT-blocked → 443 relay, as expected) and `curl http://nchc-mem-serve:18080/`
+(and the `100.x` IP) returned HTTP 200 against a `127.0.0.1:18080` server — confirming userspace
+**inbound→localhost forwarding** and **MagicDNS** both work. ~50 ms RTT is ample for ~1 Hz serving.
+
 ## Design
 
 ### Change 1 — The request envelope (explicit `endpoint`, per-env `session_id`)
@@ -121,8 +127,9 @@ existing clients.
 2. `tailscaled --tun=userspace-networking --state=/work/roboleon1295/ts.state
    --socket=/work/roboleon1295/ts.sock &`
 3. `tailscale --socket=… up --authkey="$(cat /work/roboleon1295/.tailscale_authkey)"
-   --hostname=nchc-mem-serve --ephemeral`; wait for `tailscale status` = connected; print the
-   `100.x` IP.
+   --hostname=nchc-mem-serve --reset` (note: **`--ephemeral` is NOT an `up` flag** — ephemerality is
+   a property of the auth key, set in the console; verified 2026-07-03). Wait for `tailscale status`
+   = connected; print the `100.x` IP.
 4. `uv run --no-sync python scripts/serve_mem_session.py <config> <ckpt_dir> --port $PORT` on
    `127.0.0.1:$PORT`; hold until `--time` / cancellation.
 

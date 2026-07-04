@@ -152,11 +152,13 @@ def _decode_ids_to_text(tokenizer, ids) -> str:
         return ""
 
 
-def evaluate_hl(model, dataset, tokenizer, *, batch_size, max_new_tokens, gen_examples, rng, n_samples=0):
+def evaluate_hl(model, dataset, tokenizer, *, batch_size, max_new_tokens, gen_examples, rng, n_samples=0, ce=True):
     """Held-out eval: teacher-forced CE over the dataset + generation metrics on a subset.
 
     Returns ``(metrics, samples)`` where ``samples`` is up to ``n_samples`` dicts
     ``{goal, target, generated, subtask_match, memory_match}`` for logging/inspection.
+    ``ce=False`` skips the full-dataset CE pass (much faster when only the bucketed
+    generation metrics are needed, e.g. the standalone 2x2 eval).
     """
     from openpi.policies.mem_policy import MEMPolicy
     from openpi.training.robomind_hl import collate_hl
@@ -165,16 +167,18 @@ def evaluate_hl(model, dataset, tokenizer, *, batch_size, max_new_tokens, gen_ex
     n = len(dataset)
 
     # --- CE loss over full batches (jitted forward keeps memory low). ---
-    ce_fn = nnx_utils.module_jit(model.compute_loss_hl)
-    ce_sum, ce_count = 0.0, 0
-    for start in range(0, n - batch_size + 1, batch_size):
-        obs_dict, tgt, mask = collate_hl([dataset[i] for i in range(start, start + batch_size)])
-        # collate_hl yields numpy; the eager generation path needs jax arrays for jaxtyping.
-        obs = jax.tree.map(jnp.asarray, _model.Observation.from_dict(obs_dict))
-        loss = ce_fn(rng, obs, jnp.asarray(tgt), jnp.asarray(mask))
-        ce_sum += float(jnp.sum(loss))
-        ce_count += int(loss.shape[0])
-    ce_loss = ce_sum / max(ce_count, 1)
+    ce_loss = float("nan")
+    if ce:
+        ce_fn = nnx_utils.module_jit(model.compute_loss_hl)
+        ce_sum, ce_count = 0.0, 0
+        for start in range(0, n - batch_size + 1, batch_size):
+            obs_dict, tgt, mask = collate_hl([dataset[i] for i in range(start, start + batch_size)])
+            # collate_hl yields numpy; the eager generation path needs jax arrays for jaxtyping.
+            obs = jax.tree.map(jnp.asarray, _model.Observation.from_dict(obs_dict))
+            loss = ce_fn(rng, obs, jnp.asarray(tgt), jnp.asarray(mask))
+            ce_sum += float(jnp.sum(loss))
+            ce_count += int(loss.shape[0])
+        ce_loss = ce_sum / max(ce_count, 1)
 
     # --- Generation metrics, bucketed by the `update` flag ---
     # update=False targets copy the input memory (a shortcut the model can exploit), so we

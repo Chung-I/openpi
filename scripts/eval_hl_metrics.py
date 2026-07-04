@@ -76,6 +76,7 @@ def main():
         metrics, _ = hl_training.evaluate_hl(
             model, ds, tokenizer, batch_size=config.batch_size,
             max_new_tokens=config.max_new_tokens, gen_examples=args.gen_examples, rng=jax.random.key(0),
+            ce=False,  # bucketed generation metrics only; skip the slow full-dataset CE
         )
         print(f"\n[{split}]  n_update={metrics['n_update']} n_noupdate={metrics['n_noupdate']}")
         for m in ["subtask_exact_match", "memory_exact_match", "token_accuracy"]:

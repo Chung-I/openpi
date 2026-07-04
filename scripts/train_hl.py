@@ -43,6 +43,7 @@ def _datasets(config, tokenizer):
             max_prompt_tokens=config.max_prompt_tokens,
             max_memory_tokens=config.max_memory_tokens,
             max_target_tokens=config.max_target_tokens,
+            question_prompt=config.question_prompt,
         )
 
     train = make(config.manifest_train, config.frames_train, train_eps)

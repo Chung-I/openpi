@@ -25,7 +25,7 @@ from openpi.training import config_hl, hl_splits, hl_training
 from openpi.training.robomind_hl import RobomindHLDataset, collate_hl, load_paligemma_sp
 
 
-def _build_dataset(config, tokenizer, split):
+def _build_dataset(config, tokenizer, split, question_prompt=False):
     splits = hl_splits.load_splits(config.splits_path)
 
     def make(manifest, frames, ep_ids):
@@ -34,6 +34,7 @@ def _build_dataset(config, tokenizer, split):
             max_prompt_tokens=config.max_prompt_tokens,
             max_memory_tokens=config.max_memory_tokens,
             max_target_tokens=config.max_target_tokens,
+            question_prompt=question_prompt or config.question_prompt,
         )
 
     if split == "test":
@@ -56,19 +57,25 @@ def main():
     ap.add_argument("--split", default="dev_unseen", choices=["dev_seen", "dev_unseen", "test"])
     ap.add_argument("--n", type=int, default=10)
     ap.add_argument("--step", type=int, default=None, help="checkpoint step (default: latest)")
+    ap.add_argument("--zero-shot", action="store_true", help="use the pretrained weights directly (no HL training / no checkpoint)")
+    ap.add_argument("--question-prompt", action="store_true", help="phrase the goal as a pi0.5-style question")
     args = ap.parse_args()
 
     config = config_hl.get_config(args.config)
     mesh = sharding.make_mesh(config.fsdp_devices)
     tokenizer = load_paligemma_sp()
-    ds = _build_dataset(config, tokenizer, args.split)
+    ds = _build_dataset(config, tokenizer, args.split, question_prompt=args.question_prompt)
 
-    ckpt_mgr, _ = _checkpoints.initialize_checkpoint_dir(
-        config.checkpoint_dir, keep_period=config.keep_period, overwrite=False, resume=True
-    )
-    state, _ = hl_training.init_hl_train_state(config, jax.random.key(0), mesh, resume=True)
-    stub_dl = types.SimpleNamespace(data_config=lambda: types.SimpleNamespace(norm_stats=None, asset_id=None))
-    state = _checkpoints.restore_state(ckpt_mgr, state, stub_dl, step=args.step)
+    if args.zero_shot:
+        # Pretrained checkpoint (pi05) with fresh zero-init LoRA -> the untrained VLM.
+        state, _ = hl_training.init_hl_train_state(config, jax.random.key(0), mesh, resume=False)
+    else:
+        ckpt_mgr, _ = _checkpoints.initialize_checkpoint_dir(
+            config.checkpoint_dir, keep_period=config.keep_period, overwrite=False, resume=True
+        )
+        state, _ = hl_training.init_hl_train_state(config, jax.random.key(0), mesh, resume=True)
+        stub_dl = types.SimpleNamespace(data_config=lambda: types.SimpleNamespace(norm_stats=None, asset_id=None))
+        state = _checkpoints.restore_state(ckpt_mgr, state, stub_dl, step=args.step)
     model = nnx.merge(state.model_def, state.params)
     model.eval()
 

@@ -33,6 +33,7 @@ def _build_dataset(config, tokenizer, split):
             max_prompt_tokens=config.max_prompt_tokens,
             max_memory_tokens=config.max_memory_tokens,
             max_target_tokens=config.max_target_tokens,
+            question_prompt=config.question_prompt,
         )
 
     if split == "test":

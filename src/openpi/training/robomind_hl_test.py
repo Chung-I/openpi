@@ -101,6 +101,21 @@ def test_dataset_and_collate_to_observation(tmp_path):
     assert obs.tokenized_prompt is not None
 
 
+def test_question_prompt_wraps_goal(tmp_path):
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    _write_frame(frames / "f0.jpg")
+    tok = _FakeTok()
+    row = _row("frames/f0.jpg")  # goal = "closing a trash bin"
+    plain = hl.build_hl_example(row, tmp_path, tok, max_prompt_tokens=32)
+    ques = hl.build_hl_example(row, tmp_path, tok, max_prompt_tokens=32, question_prompt=True)
+    n_plain = int(plain["tokenized_prompt_mask"].sum())
+    n_ques = int(ques["tokenized_prompt_mask"].sum())
+    expected = tok.encode(hl.HL_QUESTION_TEMPLATE.format(goal=row["goal"]))
+    assert ques["tokenized_prompt"][:n_ques].tolist() == expected[:n_ques]
+    assert n_ques > n_plain  # question wrapper adds tokens
+
+
 def test_dataset_episode_filter(tmp_path):
     rows = [
         {"episode_id": "h5/241021_taskA_0/s/train/x", **_row("frames/a.jpg")},

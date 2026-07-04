@@ -29,6 +29,8 @@ import numpy as np
 # Camera key the HL branch reads (single-frame o_t). RoboMIND camera_top -> base_0_rgb.
 HL_CAMERA = "base_0_rgb"
 HL_TARGET_TEMPLATE = "Subtask: {subtask} Memory: {memory}"
+# pi0.5's high-level prompt phrases the goal as a question ("How would you clean the bedroom?").
+HL_QUESTION_TEMPLATE = "How would you {goal}?"
 _PADDING_TOKEN_ID = 0
 _EOS_TOKEN_ID = 1  # PaliGemma / Gemma SentencePiece EOS
 
@@ -78,6 +80,7 @@ def build_hl_example(
     max_prompt_tokens: int = 48,
     max_memory_tokens: int = 128,
     max_target_tokens: int = 200,
+    question_prompt: bool = False,
 ) -> dict:
     """Build one HL training example from a manifest row (dict) + its frame on disk."""
     import cv2
@@ -89,7 +92,10 @@ def build_hl_example(
     img = img[:, :, ::-1]  # BGR -> RGB (frames were written RGB via PIL; cv2 reads BGR)
     img = np.ascontiguousarray(img, dtype=np.uint8)
 
-    prompt_t, prompt_m = _encode(tokenizer, row.get("goal", ""), max_prompt_tokens)
+    goal = row.get("goal", "")
+    if question_prompt:  # pi0.5-style HL prompt
+        goal = HL_QUESTION_TEMPLATE.format(goal=goal)
+    prompt_t, prompt_m = _encode(tokenizer, goal, max_prompt_tokens)
     mem_t, mem_m = _encode(tokenizer, row.get("input_memory", ""), max_memory_tokens)
     target_text = HL_TARGET_TEMPLATE.format(subtask=row["target_subtask"], memory=row["target_memory"])
     target_t, target_m = _encode(tokenizer, target_text, max_target_tokens, add_eos=True)
@@ -121,6 +127,7 @@ class RobomindHLDataset:
         max_prompt_tokens: int = 48,
         max_memory_tokens: int = 128,
         max_target_tokens: int = 200,
+        question_prompt: bool = False,
     ):
         self.frames_dir = pathlib.Path(frames_dir)
         self.tokenizer = tokenizer
@@ -129,6 +136,7 @@ class RobomindHLDataset:
             "max_prompt_tokens": max_prompt_tokens,
             "max_memory_tokens": max_memory_tokens,
             "max_target_tokens": max_target_tokens,
+            "question_prompt": question_prompt,
         }
         rows = [json.loads(line) for line in pathlib.Path(manifest_path).read_text().splitlines() if line.strip()]
         if episode_ids is not None:

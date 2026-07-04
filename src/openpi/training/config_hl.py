@@ -71,6 +71,9 @@ class HLTrainConfig:
     # Oversample update=True (subtask/memory transition) examples to ~match update=False,
     # so the model can't shortcut by copying the input memory. Dataset itself is unchanged.
     upsample_update: bool = False
+    # Phrase the goal as a pi0.5-style HL question ("How would you {goal}?") to match the
+    # pretrained checkpoint's high-level prompt distribution.
+    question_prompt: bool = False
 
     # Tokenization / decode
     max_prompt_tokens: int = 48
@@ -121,6 +124,16 @@ _CONFIGS = [
         exp_name="pi0_mem_hl_fr3_droid",
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "gs://openpi-assets/checkpoints/pi05_droid/params",
+            missing_regex=".*(lora|state_proj|video_img).*",
+        ),
+    ),
+    # Question-prompt arm: pi0.5-style HL question format (frozen SigLIP, matches A otherwise).
+    HLTrainConfig(
+        name="pi0_mem_hl_fr3_base_q",
+        exp_name="pi0_mem_hl_fr3_base_q",
+        question_prompt=True,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params",
             missing_regex=".*(lora|state_proj|video_img).*",
         ),
     ),

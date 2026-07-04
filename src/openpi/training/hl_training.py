@@ -134,8 +134,12 @@ def _decode_ids_to_text(tokenizer, ids) -> str:
         return ""
 
 
-def evaluate_hl(model, dataset, tokenizer, *, batch_size, max_new_tokens, gen_examples, rng) -> dict:
-    """Held-out eval: teacher-forced CE over the dataset + generation metrics on a subset."""
+def evaluate_hl(model, dataset, tokenizer, *, batch_size, max_new_tokens, gen_examples, rng, n_samples=0):
+    """Held-out eval: teacher-forced CE over the dataset + generation metrics on a subset.
+
+    Returns ``(metrics, samples)`` where ``samples`` is up to ``n_samples`` dicts
+    ``{goal, target, generated, subtask_match, memory_match}`` for logging/inspection.
+    """
     from openpi.policies.mem_policy import MEMPolicy
     from openpi.training.robomind_hl import collate_hl
 
@@ -157,6 +161,8 @@ def evaluate_hl(model, dataset, tokenizer, *, batch_size, max_new_tokens, gen_ex
     # --- Generation metrics on the first `gen_examples`. ---
     k = min(gen_examples, n)
     sub_hits = mem_hits = tok_hits = tok_total = 0
+    samples = []
+    rows = getattr(dataset, "rows", None)
     start = 0
     while start < k:
         b = min(batch_size, k - start)
@@ -164,18 +170,29 @@ def evaluate_hl(model, dataset, tokenizer, *, batch_size, max_new_tokens, gen_ex
         obs = jax.tree.map(jnp.asarray, _model.Observation.from_dict(obs_dict))
         gen = np.asarray(model.predict_subtask_and_memory_cached(rng, obs, max_new_tokens=max_new_tokens))
         for j in range(b):
-            gs, gm = MEMPolicy._parse_hl_output(_decode_ids_to_text(tokenizer, gen[j]))
-            ts, tm = MEMPolicy._parse_hl_output(_decode_ids_to_text(tokenizer, np.asarray(tgt[j])))
+            gtxt = _decode_ids_to_text(tokenizer, gen[j])
+            ttxt = _decode_ids_to_text(tokenizer, np.asarray(tgt[j]))
+            gs, gm = MEMPolicy._parse_hl_output(gtxt)
+            ts, tm = MEMPolicy._parse_hl_output(ttxt)
             sub_hits += int(gs == ts)
             mem_hits += int(gm == tm)
             length = min(int(gen[j].shape[0]), int(np.asarray(mask[j]).sum()))
             tok_hits += int(np.sum(np.asarray(gen[j])[:length] == np.asarray(tgt[j])[:length]))
             tok_total += length
+            if len(samples) < n_samples:
+                samples.append({
+                    "goal": rows[start + j].get("goal", "") if rows is not None else "",
+                    "target": ttxt,
+                    "generated": gtxt,
+                    "subtask_match": int(gs == ts),
+                    "memory_match": int(gm == tm),
+                })
         start += b
     denom = max(k, 1)
-    return {
+    metrics = {
         "ce_loss": ce_loss,
         "subtask_exact_match": sub_hits / denom,
         "memory_exact_match": mem_hits / denom,
         "token_accuracy": tok_hits / max(tok_total, 1),
     }
+    return metrics, samples

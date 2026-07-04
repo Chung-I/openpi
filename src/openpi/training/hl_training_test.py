@@ -83,8 +83,11 @@ def test_evaluate_hl_returns_metrics():
                 "target_mask": np.concatenate([np.ones(5, bool), np.zeros(27, bool)]),
             }
 
-    metrics = hl_training.evaluate_hl(
-        model, _DS(), _Tok(), batch_size=2, max_new_tokens=4, gen_examples=2, rng=jax.random.key(0)
+    metrics, samples = hl_training.evaluate_hl(
+        model, _DS(), _Tok(), batch_size=2, max_new_tokens=4, gen_examples=2, rng=jax.random.key(0), n_samples=2
     )
     for key in ["ce_loss", "subtask_exact_match", "memory_exact_match", "token_accuracy"]:
         assert key in metrics and np.isfinite(metrics[key])
+    assert isinstance(samples, list) and len(samples) <= 2
+    if samples:
+        assert {"target", "generated", "subtask_match", "memory_match"} <= set(samples[0])

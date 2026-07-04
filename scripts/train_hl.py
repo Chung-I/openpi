@@ -96,10 +96,12 @@ def main(config: config_hl.HLTrainConfig, *, overfit_batch: bool = False):
     ptrain = jax.jit(functools.partial(hl_training.hl_train_step, config), donate_argnums=(1,))
     fixed = _to_obs_batch(next(it)) if overfit_batch else None
 
+    _sample_cols = ["step", "split", "goal", "target", "generated", "subtask_match", "memory_match"]
+
     def _eval_and_log(datasets: dict, step: int):
         model = nnx.merge(state.model_def, state.params)
         for name, ds in datasets.items():
-            metrics = hl_training.evaluate_hl(
+            metrics, samples = hl_training.evaluate_hl(
                 model,
                 ds,
                 tokenizer,
@@ -107,9 +109,22 @@ def main(config: config_hl.HLTrainConfig, *, overfit_batch: bool = False):
                 max_new_tokens=config.max_new_tokens,
                 gen_examples=config.eval_gen_examples,
                 rng=train_rng,
+                n_samples=config.eval_log_samples,
             )
             wandb.log({f"{name}/{k}": v for k, v in metrics.items()}, step=step)
             logging.info("step %d %s: %s", step, name, metrics)
+            for s in samples[:3]:  # a few sample generations into the run log
+                logging.info(
+                    "  [%s] TGT=%r GEN=%r (sub=%d mem=%d)",
+                    name, s["target"], s["generated"], s["subtask_match"], s["memory_match"],
+                )
+            if samples:
+                # wandb 0.19 has no incremental tables; log a fresh table per step (scrub the step slider).
+                table = wandb.Table(
+                    columns=_sample_cols,
+                    data=[[step, name, s["goal"], s["target"], s["generated"], s["subtask_match"], s["memory_match"]] for s in samples],
+                )
+                wandb.log({f"samples/{name}": table}, step=step)
 
     for step in tqdm.tqdm(range(int(state.step), config.num_train_steps)):
         batch = fixed if overfit_batch else _to_obs_batch(next(it))

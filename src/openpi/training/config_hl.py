@@ -75,6 +75,7 @@ class HLTrainConfig:
     max_target_tokens: int = 200
     max_new_tokens: int = 64
     eval_gen_examples: int = 64  # generation-metric subset size per dev slice
+    eval_log_samples: int = 8  # generated-vs-target examples logged (stdout + wandb table) per slice
 
     # Bookkeeping
     checkpoint_base_dir: str = "./checkpoints"

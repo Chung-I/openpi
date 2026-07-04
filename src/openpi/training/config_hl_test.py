@@ -24,3 +24,19 @@ def test_freeze_filter_trains_only_lora():
     assert leaves, "expected some trainable lora params"
     for path, _ in leaves:
         assert "lora" in jax.tree_util.keystr(path), f"non-lora trainable param: {jax.tree_util.keystr(path)}"
+
+
+def test_vis_arm_trains_lora_plus_siglip():
+    cfg = config_hl.get_config("pi0_mem_hl_fr3_base_vis")
+    assert cfg.train_image_encoder
+    abstract = nnx.eval_shape(lambda: cfg.model.create(jax.random.key(0)))
+    paths = [
+        jax.tree_util.keystr(p) for p, _ in jax.tree_util.tree_leaves_with_path(nnx.state(abstract, cfg.trainable_filter))
+    ]
+    assert paths
+    # every trainable leaf is a LoRA param or a SigLIP image-encoder param (/img/, not video_img)
+    for p in paths:
+        assert ("lora" in p) or ("img" in p and "video_img" not in p), p
+    # base LLM (non-lora) stays frozen; SigLIP img is actually included
+    assert not any(("llm" in p and "lora" not in p) for p in paths)
+    assert any(("img" in p and "video_img" not in p) for p in paths)

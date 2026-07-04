@@ -49,6 +49,8 @@ class HLTrainConfig:
     )
     ema_decay: float | None = None
     grad_accum_steps: int = 1
+    # B: also finetune the SigLIP image encoder (base LLM still frozen) for visual grounding.
+    train_image_encoder: bool = False
 
     seed: int = 42
     batch_size: int = 32
@@ -88,7 +90,11 @@ class HLTrainConfig:
 
     @property
     def freeze_filter(self) -> nnx.filterlib.Filter:
-        # Strict LoRA-only: freeze every param whose path does NOT contain "lora"
+        if self.train_image_encoder:
+            # B: train LoRA + the SigLIP image encoder (path .../img/...); the base LLM and
+            # video_img stay frozen. "/img/" matches SigLIP but NOT "video_img" (no "/img/").
+            return nnx.Not(nnx_utils.PathRegex(".*(/img/|lora).*"))
+        # A (strict LoRA-only): freeze every param whose path does NOT contain "lora"
         # (base LLM + SigLIP image encoder + action expert all frozen).
         return nnx.Not(nnx_utils.PathRegex(".*lora.*"))
 
@@ -109,6 +115,25 @@ _CONFIGS = [
     HLTrainConfig(
         name="pi0_mem_hl_fr3_droid",
         exp_name="pi0_mem_hl_fr3_droid",
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_droid/params",
+            missing_regex=".*(lora|state_proj|video_img).*",
+        ),
+    ),
+    # B arms: same as above but with the SigLIP image encoder unfrozen (visual grounding).
+    HLTrainConfig(
+        name="pi0_mem_hl_fr3_base_vis",
+        exp_name="pi0_mem_hl_fr3_base_vis",
+        train_image_encoder=True,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params",
+            missing_regex=".*(lora|state_proj|video_img).*",
+        ),
+    ),
+    HLTrainConfig(
+        name="pi0_mem_hl_fr3_droid_vis",
+        exp_name="pi0_mem_hl_fr3_droid_vis",
+        train_image_encoder=True,
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "gs://openpi-assets/checkpoints/pi05_droid/params",
             missing_regex=".*(lora|state_proj|video_img).*",

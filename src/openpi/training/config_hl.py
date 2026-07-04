@@ -134,6 +134,17 @@ _CONFIGS = [
             missing_regex=".*(lora|state_proj|video_img).*",
         ),
     ),
+    # B + upsample: unfrozen SigLIP AND update-upsampling (both levers together).
+    HLTrainConfig(
+        name="pi0_mem_hl_fr3_base_vis_upsample",
+        exp_name="pi0_mem_hl_fr3_base_vis_upsample",
+        train_image_encoder=True,
+        upsample_update=True,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params",
+            missing_regex=".*(lora|state_proj|video_img).*",
+        ),
+    ),
     # B arms: same as above but with the SigLIP image encoder unfrozen (visual grounding).
     HLTrainConfig(
         name="pi0_mem_hl_fr3_base_vis",

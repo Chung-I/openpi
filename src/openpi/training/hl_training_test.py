@@ -130,3 +130,46 @@ def test_upsample_update_balances_pool():
         assert 0.4 < frac_update < 0.6, f"upsampled update fraction {frac_update:.2f} not ~0.5"
     finally:
         rh.collate_hl = orig
+
+
+def test_evaluate_hl_buckets_by_update():
+    cfg = _dummy_config()
+    model = cfg.model.create(jax.random.key(0))
+
+    class _Tok:
+        def encode(self, text):
+            return [ord(c) % 50 + 3 for c in text][:16]
+
+        def decode(self, ids):
+            return "".join(chr((i - 3) % 50 + 65) for i in ids)
+
+    def _ex():
+        return {
+            "image": np.zeros((*_model.IMAGE_RESOLUTION, 3), np.uint8),
+            "image_mask": np.array(True),
+            "state": np.zeros(32, np.float32),
+            "tokenized_prompt": np.zeros(48, np.int32),
+            "tokenized_prompt_mask": np.zeros(48, bool),
+            "tokenized_memory": np.zeros(128, np.int32),
+            "tokenized_memory_mask": np.zeros(128, bool),
+            "target_tokens": np.ones(32, np.int32),
+            "target_mask": np.concatenate([np.ones(5, bool), np.zeros(27, bool)]),
+        }
+
+    class _DS:
+        rows = [{"update": (i % 2 == 0), "goal": "g"} for i in range(10)]  # 5 update / 5 no-update
+
+        def __len__(self):
+            return 10
+
+        def __getitem__(self, i):
+            return _ex()
+
+    # batch_size=3 makes chunks straddle the update/no-update boundary (upd_idx then noupd_idx).
+    metrics, samples = hl_training.evaluate_hl(
+        model, _DS(), _Tok(), batch_size=3, max_new_tokens=4, gen_examples=4, rng=jax.random.key(0), n_samples=3
+    )
+    assert metrics["n_update"] == 4 and metrics["n_noupdate"] == 4  # gen_examples=4 of each bucket
+    for m in ["subtask_exact_match", "memory_exact_match", "token_accuracy"]:
+        assert np.isfinite(metrics[f"{m}_update"]) and np.isfinite(metrics[f"{m}_noupdate"])
+    assert samples and all(s["update"] for s in samples)  # update bucket is evaluated first

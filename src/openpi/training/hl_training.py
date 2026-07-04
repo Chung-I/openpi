@@ -186,8 +186,11 @@ def evaluate_hl(model, dataset, tokenizer, *, batch_size, max_new_tokens, gen_ex
         return rows is not None and _row_is_update(rows[i])
 
     if rows is not None:
-        upd_idx = [i for i in range(n) if _is_update(i)][:gen_examples]
-        noupd_idx = [i for i in range(n) if not _is_update(i)][:gen_examples]
+        # Fixed-seed shuffle so the subset is representative (not a manifest-order prefix) AND
+        # identical across arms/checkpoints that share a split (same candidates -> same subset).
+        srng = np.random.default_rng(0)
+        upd_idx = [int(i) for i in srng.permutation([i for i in range(n) if _is_update(i)])[:gen_examples]]
+        noupd_idx = [int(i) for i in srng.permutation([i for i in range(n) if not _is_update(i)])[:gen_examples]]
     else:
         upd_idx, noupd_idx = [], list(range(min(gen_examples, n)))
     idxs = upd_idx + noupd_idx

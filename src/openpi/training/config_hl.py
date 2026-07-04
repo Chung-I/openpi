@@ -59,7 +59,7 @@ class HLTrainConfig:
     log_interval: int = 50
     eval_interval: int = 1_000
     save_interval: int = 5_000
-    keep_period: int | None = 10_000
+    keep_period: int | None = 5_000  # = save_interval: keep every saved checkpoint (runs overfit; best is early)
 
     # Data
     manifest_train: str = f"{_DATA_ROOT}/robomind_hl_fr3/manifest.jsonl"

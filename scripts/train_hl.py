@@ -125,6 +125,7 @@ def main(config: config_hl.HLTrainConfig, *, overfit_batch: bool = False):
             _checkpoints.save_state(ckpt_mgr, state, stub_dl, step)
 
     if not overfit_batch:
+        _checkpoints.save_state(ckpt_mgr, state, stub_dl, int(state.step))  # final checkpoint
         _eval_and_log({"test": test_ds}, config.num_train_steps)
     else:
         # Generation round-trip: after memorizing the fixed batch, does free-generation

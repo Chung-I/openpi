@@ -68,6 +68,9 @@ class HLTrainConfig:
     frames_test: str = f"{_DATA_ROOT}/robomind_hl"
     splits_path: str = "splits/fr3_splits.json"
     num_workers: int = 8
+    # Oversample update=True (subtask/memory transition) examples to ~match update=False,
+    # so the model can't shortcut by copying the input memory. Dataset itself is unchanged.
+    upsample_update: bool = False
 
     # Tokenization / decode
     max_prompt_tokens: int = 48
@@ -118,6 +121,16 @@ _CONFIGS = [
         exp_name="pi0_mem_hl_fr3_droid",
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "gs://openpi-assets/checkpoints/pi05_droid/params",
+            missing_regex=".*(lora|state_proj|video_img).*",
+        ),
+    ),
+    # Upsample arm: frozen SigLIP (matches the A baseline) but oversample update=True examples.
+    HLTrainConfig(
+        name="pi0_mem_hl_fr3_base_upsample",
+        exp_name="pi0_mem_hl_fr3_base_upsample",
+        upsample_update=True,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params",
             missing_regex=".*(lora|state_proj|video_img).*",
         ),
     ),

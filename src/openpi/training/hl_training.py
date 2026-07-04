@@ -101,16 +101,34 @@ def hl_train_step(
     return new_state, info
 
 
-def make_hl_batch_iterator(dataset, *, batch_size, rng: np.random.Generator, shuffle=True):
-    """Yield collate_hl outputs (obs_dict, target_tokens, target_mask) forever."""
+def _row_is_update(row) -> bool:
+    """Whether a manifest row is a subtask/memory transition (update=True). Robust to bool/str."""
+    return str(row.get("update", False)).lower() == "true"
+
+
+def make_hl_batch_iterator(dataset, *, batch_size, rng: np.random.Generator, shuffle=True, upsample_update=False):
+    """Yield collate_hl outputs (obs_dict, target_tokens, target_mask) forever.
+
+    upsample_update: oversample the (minority) update=True examples so they appear about as
+    often as update=False, without modifying the dataset — the index pool repeats update=True
+    indices to match the update=False count.
+    """
     from openpi.training.robomind_hl import collate_hl
 
     n = len(dataset)
     order = np.arange(n)
+    if upsample_update:
+        rows = getattr(dataset, "rows", None)
+        upd = [i for i in range(n) if rows is not None and _row_is_update(rows[i])]
+        noupd = [i for i in range(n) if not (rows is not None and _row_is_update(rows[i]))]
+        if upd and noupd:
+            reps = int(np.ceil(len(noupd) / len(upd)))
+            order = np.array(noupd + (upd * reps)[: len(noupd)])  # ~balanced pool; dataset untouched
+
     while True:
         if shuffle:
             rng.shuffle(order)
-        for start in range(0, n - batch_size + 1, batch_size):
+        for start in range(0, len(order) - batch_size + 1, batch_size):
             idx = order[start : start + batch_size]
             yield collate_hl([dataset[int(i)] for i in idx])
 
@@ -158,41 +176,72 @@ def evaluate_hl(model, dataset, tokenizer, *, batch_size, max_new_tokens, gen_ex
         ce_count += int(loss.shape[0])
     ce_loss = ce_sum / max(ce_count, 1)
 
-    # --- Generation metrics on the first `gen_examples`. ---
-    k = min(gen_examples, n)
-    sub_hits = mem_hits = tok_hits = tok_total = 0
-    samples = []
+    # --- Generation metrics, bucketed by the `update` flag ---
+    # update=False targets copy the input memory (a shortcut the model can exploit), so we
+    # report update=True and update=False separately over a BALANCED subset: up to
+    # `gen_examples` of each bucket (so the ~4:1 imbalance can't hide the transition cases).
     rows = getattr(dataset, "rows", None)
-    start = 0
-    while start < k:
-        b = min(batch_size, k - start)
-        obs_dict, tgt, mask = collate_hl([dataset[i] for i in range(start, start + b)])
+
+    def _is_update(i):
+        return rows is not None and _row_is_update(rows[i])
+
+    if rows is not None:
+        upd_idx = [i for i in range(n) if _is_update(i)][:gen_examples]
+        noupd_idx = [i for i in range(n) if not _is_update(i)][:gen_examples]
+    else:
+        upd_idx, noupd_idx = [], list(range(min(gen_examples, n)))
+    idxs = upd_idx + noupd_idx
+
+    # per bucket: [subtask_hits, memory_hits, token_hits, token_total, count]
+    acc = {"update": [0, 0, 0, 0, 0], "noupdate": [0, 0, 0, 0, 0]}
+    samples = []
+    for bstart in range(0, len(idxs), batch_size):
+        chunk = idxs[bstart : bstart + batch_size]
+        obs_dict, tgt, mask = collate_hl([dataset[i] for i in chunk])
         obs = jax.tree.map(jnp.asarray, _model.Observation.from_dict(obs_dict))
         gen = np.asarray(model.predict_subtask_and_memory_cached(rng, obs, max_new_tokens=max_new_tokens))
-        for j in range(b):
+        for j, di in enumerate(chunk):
             gtxt = _decode_ids_to_text(tokenizer, gen[j])
             ttxt = _decode_ids_to_text(tokenizer, np.asarray(tgt[j]))
             gs, gm = MEMPolicy._parse_hl_output(gtxt)
             ts, tm = MEMPolicy._parse_hl_output(ttxt)
-            sub_hits += int(gs == ts)
-            mem_hits += int(gm == tm)
             length = min(int(gen[j].shape[0]), int(np.asarray(mask[j]).sum()))
-            tok_hits += int(np.sum(np.asarray(gen[j])[:length] == np.asarray(tgt[j])[:length]))
-            tok_total += length
+            th = int(np.sum(np.asarray(gen[j])[:length] == np.asarray(tgt[j])[:length]))
+            a = acc["update" if _is_update(di) else "noupdate"]
+            a[0] += int(gs == ts)
+            a[1] += int(gm == tm)
+            a[2] += th
+            a[3] += length
+            a[4] += 1
             if len(samples) < n_samples:
                 samples.append({
-                    "goal": rows[start + j].get("goal", "") if rows is not None else "",
+                    "goal": rows[di].get("goal", "") if rows is not None else "",
                     "target": ttxt,
                     "generated": gtxt,
                     "subtask_match": int(gs == ts),
                     "memory_match": int(gm == tm),
+                    "update": _is_update(di),
                 })
-        start += b
-    denom = max(k, 1)
+
+    def _bucket(name):
+        a = acc[name]
+        c, tt = max(a[4], 1), max(a[3], 1)
+        return {
+            f"subtask_exact_match_{name}": a[0] / c,
+            f"memory_exact_match_{name}": a[1] / c,
+            f"token_accuracy_{name}": a[2] / tt,
+            f"n_{name}": a[4],
+        }
+
+    tot = max(acc["update"][4] + acc["noupdate"][4], 1)
+    tt_tot = max(acc["update"][3] + acc["noupdate"][3], 1)
     metrics = {
         "ce_loss": ce_loss,
-        "subtask_exact_match": sub_hits / denom,
-        "memory_exact_match": mem_hits / denom,
-        "token_accuracy": tok_hits / max(tok_total, 1),
+        # "overall" here is over the BALANCED subset (≈50/50 update), not the natural distribution.
+        "subtask_exact_match": (acc["update"][0] + acc["noupdate"][0]) / tot,
+        "memory_exact_match": (acc["update"][1] + acc["noupdate"][1]) / tot,
+        "token_accuracy": (acc["update"][2] + acc["noupdate"][2]) / tt_tot,
+        **_bucket("update"),
+        **_bucket("noupdate"),
     }
     return metrics, samples

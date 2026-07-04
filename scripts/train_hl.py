@@ -74,7 +74,8 @@ def main(config: config_hl.HLTrainConfig, *, overfit_batch: bool = False):
     tokenizer = load_paligemma_sp()
     train_ds, dev, test_ds = _datasets(config, tokenizer)
     it = hl_training.make_hl_batch_iterator(
-        train_ds, batch_size=config.batch_size, rng=np.random.default_rng(config.seed)
+        train_ds, batch_size=config.batch_size, rng=np.random.default_rng(config.seed),
+        upsample_update=config.upsample_update,
     )
 
     ckpt_mgr, resuming = _checkpoints.initialize_checkpoint_dir(
@@ -96,7 +97,7 @@ def main(config: config_hl.HLTrainConfig, *, overfit_batch: bool = False):
     ptrain = jax.jit(functools.partial(hl_training.hl_train_step, config), donate_argnums=(1,))
     fixed = _to_obs_batch(next(it)) if overfit_batch else None
 
-    _sample_cols = ["step", "split", "goal", "target", "generated", "subtask_match", "memory_match"]
+    _sample_cols = ["step", "split", "update", "goal", "target", "generated", "subtask_match", "memory_match"]
 
     def _eval_and_log(datasets: dict, step: int):
         model = nnx.merge(state.model_def, state.params)
@@ -122,7 +123,7 @@ def main(config: config_hl.HLTrainConfig, *, overfit_batch: bool = False):
                 # wandb 0.19 has no incremental tables; log a fresh table per step (scrub the step slider).
                 table = wandb.Table(
                     columns=_sample_cols,
-                    data=[[step, name, s["goal"], s["target"], s["generated"], s["subtask_match"], s["memory_match"]] for s in samples],
+                    data=[[step, name, bool(s.get("update", False)), s["goal"], s["target"], s["generated"], s["subtask_match"], s["memory_match"]] for s in samples],
                 )
                 wandb.log({f"samples/{name}": table}, step=step)
 

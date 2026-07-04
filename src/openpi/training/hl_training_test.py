@@ -88,6 +88,45 @@ def test_evaluate_hl_returns_metrics():
     )
     for key in ["ce_loss", "subtask_exact_match", "memory_exact_match", "token_accuracy"]:
         assert key in metrics and np.isfinite(metrics[key])
+    # per-update bucketed keys present and finite
+    for key in [
+        "subtask_exact_match_update", "memory_exact_match_update", "token_accuracy_update",
+        "subtask_exact_match_noupdate", "memory_exact_match_noupdate", "token_accuracy_noupdate",
+        "n_update", "n_noupdate",
+    ]:
+        assert key in metrics and np.isfinite(metrics[key])
     assert isinstance(samples, list) and len(samples) <= 2
     if samples:
-        assert {"target", "generated", "subtask_match", "memory_match"} <= set(samples[0])
+        assert {"target", "generated", "subtask_match", "memory_match", "update"} <= set(samples[0])
+
+
+def test_upsample_update_balances_pool():
+    import types as _types
+
+    rows = [{"update": (i % 5 == 0)} for i in range(100)]  # 20 update=True, 80 update=False
+
+    class _DS:
+        def __len__(self):
+            return len(rows)
+
+        def __getitem__(self, i):
+            return i  # collate not exercised; we only inspect the sampled index distribution
+
+    # Monkeypatch collate to return the raw index list so we can count update vs no-update draws.
+    import openpi.training.robomind_hl as rh
+
+    orig = rh.collate_hl
+    rh.collate_hl = lambda batch: list(batch)
+    try:
+        ds = _DS()
+        ds.rows = rows
+        it = hl_training.make_hl_batch_iterator(
+            ds, batch_size=10, rng=np.random.default_rng(0), upsample_update=True
+        )
+        drawn = []
+        for _ in range(20):  # 20 batches * 10 = 200 draws over the balanced pool
+            drawn.extend(next(it))
+        frac_update = np.mean([hl_training._row_is_update(rows[i]) for i in drawn])
+        assert 0.4 < frac_update < 0.6, f"upsampled update fraction {frac_update:.2f} not ~0.5"
+    finally:
+        rh.collate_hl = orig

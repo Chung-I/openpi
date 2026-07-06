@@ -72,12 +72,17 @@ def to_episode(rec: RobocoinRecord) -> Episode:
     return Episode(goal=rec.goal, subtasks=list(rec.subtasks), success_flags=list(rec.success_flags))
 
 
-def load_vocab(path) -> dict[int, str]:
-    """subtask_index -> subtask text from a RoboCOIN annotations/subtask_annotations.jsonl."""
-    return {r["subtask_index"]: r["subtask"] for r in _read_jsonl(path)}
+def load_vocab(path, index_key: str = "subtask_index", text_key: str = "subtask") -> dict[int, str]:
+    """index -> text vocab from a jsonl file of {index_key: int, text_key: str} rows.
+
+    Defaults match RoboCOIN's annotations/subtask_annotations.jsonl; other datasets (e.g. Galaxea's
+    standard LeRobot meta/tasks.jsonl, which uses task_index/task) pass their own key names so the
+    jsonl-parsing logic stays in one place.
+    """
+    return {r[index_key]: r[text_key] for r in read_jsonl(path)}
 
 
-def _read_jsonl(path) -> list[dict]:
+def read_jsonl(path) -> list[dict]:
     return [json.loads(line) for line in pathlib.Path(path).read_text().splitlines() if line.strip()]
 
 
@@ -112,7 +117,7 @@ def records_from_local(root, max_episodes: int | None = None, repo: str = "RoboC
     root = pathlib.Path(root)
     info = json.loads((root / "meta" / "info.json").read_text())
     vocab = load_vocab(root / "annotations" / "subtask_annotations.jsonl")
-    episodes = _read_jsonl(root / "meta" / "episodes.jsonl")[:max_episodes]
+    episodes = read_jsonl(root / "meta" / "episodes.jsonl")[:max_episodes]
     return _build_records(info, vocab, episodes, lambda rel: root / rel, repo)
 
 
@@ -129,5 +134,5 @@ def records_from_repo(repo: str, max_episodes: int | None = None) -> list[Roboco
 
     info = json.loads(_dl("meta/info.json").read_text())
     vocab = load_vocab(_dl("annotations/subtask_annotations.jsonl"))
-    episodes = _read_jsonl(_dl("meta/episodes.jsonl"))[:max_episodes]
+    episodes = read_jsonl(_dl("meta/episodes.jsonl"))[:max_episodes]
     return _build_records(info, vocab, episodes, _dl, repo)

@@ -149,7 +149,10 @@ def assemble(
 
     `video_path_template`, if given, takes precedence over `info.get("video_path")` and the
     `VIDEO_PATH_TEMPLATE` default (in that order) -- lets AgiBot's raw `{episode_index}/videos/
-    {video_key}` layout coexist with Galaxea's info.json-driven template and RoboCOIN's default."""
+    {video_key}` layout coexist with Galaxea's info.json-driven template and RoboCOIN's default.
+
+    `max_samples_per_subtask`, if given, caps the number of within-subtask samples per subtask to
+    counter duration bias (see `robomind.build_samples` for details)."""
     from PIL import Image
 
     if (repo is None) == (video_root is None):

@@ -105,8 +105,10 @@ def build_samples(
     Last subtask advances to "done". `max_samples_per_subtask`, if given, caps the number of
     within-subtask (no-update) samples per subtask to that many evenly-spaced frames (retaining
     the span's first and last frame) -- counters a duration bias where long subtasks otherwise
-    contribute samples proportional to their length. The boundary/transition sample is never
-    capped."""
+    contribute samples proportional to their length. Note: cap=1 keeps only the FIRST within-frame
+    (a single slot can't retain both endpoints). The boundary/transition sample is never capped."""
+    if max_samples_per_subtask is not None and max_samples_per_subtask < 1:
+        raise ValueError("max_samples_per_subtask must be >= 1")
     subtasks, ranges, flags = record["subtasks"], record["frame_ranges"], record["success_flags"]
     goal, eid, n = record["goal"], record["id"], len(record["subtasks"])
     if len(memories) != n:

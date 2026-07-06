@@ -138,6 +138,18 @@ def test_cap_applied_per_subtask_independently():
     assert w2 == [100, 110]  # under cap (2 within-samples), unchanged
 
 
+def test_cap_zero_raises():
+    """Reject non-positive cap to prevent silent data loss."""
+    with pytest.raises(ValueError, match="max_samples_per_subtask must be >= 1"):
+        rm.build_samples(_rec(), ["m1", "m2", "m3"], fps=10, max_samples_per_subtask=0)
+
+
+def test_cap_negative_raises():
+    """Reject negative cap."""
+    with pytest.raises(ValueError, match="max_samples_per_subtask must be >= 1"):
+        rm.build_samples(_rec(), ["m1", "m2", "m3"], fps=10, max_samples_per_subtask=-5)
+
+
 def test_task_of():
     assert rm._task_of("h5_franka_1rgb/bread_in_basket/success_episodes/train/1016_161244/data") == "bread_in_basket"  # noqa: SLF001
 

@@ -72,7 +72,7 @@ def record_from_episode(episode_id: str, task_index, coarse_task_index, vocab: d
     ranges: list[tuple[int, int]] = []
     for val, start, end in rc.rle_segments(task_index):
         text = english(vocab[val])
-        if is_sentinel(text):
+        if not text or is_sentinel(text):
             continue
         subtasks.append(text)
         ranges.append((start, end - 1))  # inclusive boundary: last frame the subtask is active
@@ -91,9 +91,6 @@ def to_episode(rec: GalaxeaRecord) -> Episode:
     return Episode(goal=rec.goal, subtasks=list(rec.subtasks), success_flags=list(rec.success_flags))
 
 
-def _parquet_rel(info: dict, episode_index: int) -> str:
-    chunk = episode_index // int(info.get("chunks_size", 1000))
-    return info["data_path"].format(episode_chunk=chunk, episode_index=episode_index)
 
 
 def _read_task_columns(parquet_path) -> tuple[list[int], list[int]]:
@@ -109,7 +106,7 @@ def _build_records(info, vocab, episodes, resolve_parquet, archive_name: str) ->
     out: list[GalaxeaRecord] = []
     for ep in episodes:
         idx = int(ep["episode_index"])
-        task_index, coarse_task_index = _read_task_columns(resolve_parquet(_parquet_rel(info, idx)))
+        task_index, coarse_task_index = _read_task_columns(resolve_parquet(rc._parquet_rel(info, idx)))  # noqa: SLF001
         rec = record_from_episode(f"{archive_name}/episode_{idx:06d}", task_index, coarse_task_index, vocab)
         if rec is not None:
             out.append(rec)

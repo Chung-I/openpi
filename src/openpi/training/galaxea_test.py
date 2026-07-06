@@ -79,6 +79,22 @@ def test_record_drops_qualified_and_unqualified_sentinels():
     assert r.subtasks == ["Turn on the room light with your left hand."]
 
 
+def test_record_drops_empty_text_from_bilingual_vocab():
+    """Regression: vocab "中文@" (nothing after @) makes english() return "", which should be skipped."""
+    vocab_with_empty = GALAXEA_VOCAB.copy()
+    vocab_with_empty[7] = "中文@"  # empty English side
+    task_index = _expand([(0, 5), (7, 3), (1, 5)])
+    coarse = [5] * len(task_index)
+    r = gx.record_from_episode("ep0", task_index, coarse, vocab_with_empty)
+    # The empty-text segment (value 7, frames 5-7) should be dropped
+    assert r.subtasks == [
+        "Turn on the room light with your left hand.",
+        "Turn off the room light with your left hand.",
+    ]
+    # Frame ranges should skip over the empty-text segment
+    assert r.frame_ranges == [(0, 4), (8, 12)]
+
+
 def test_record_none_when_all_task_index_null():
     task_index = _expand([(2, 5), (2, 3)])
     coarse = [5] * len(task_index)

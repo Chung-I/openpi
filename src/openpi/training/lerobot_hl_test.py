@@ -62,6 +62,38 @@ def test_assemble_writes_manifest_and_frames(tmp_path, monkeypatch):
     assert any(r["update"] and r["target_subtask"] == "b" and r["target_memory"] == "m1" for r in rows)
 
 
+def test_assemble_uses_video_path_template_from_info_json(tmp_path, monkeypatch):
+    """info.json's video_path template must be honored, not the module's default constant --
+    the default is only a fallback. Uses a custom template shaped differently from the default
+    to prove the value actually came from info.json."""
+    records = [_rec(0)]
+    labels = [{"episode_id": "0", "memories": ["m1", "m2"]}]
+    custom_template = "custom/{episode_chunk:03d}/{video_key}/ep{episode_index}.mp4"
+    assert custom_template != lh.VIDEO_PATH_TEMPLATE
+
+    def _write_custom_info():
+        p = tmp_path / "info_custom.json"
+        p.write_text(json.dumps({"fps": 30.0, "chunks_size": 1000, "video_path": custom_template}))
+        return str(p)
+
+    monkeypatch.setattr(lh, "_download_meta", lambda repo: _write_custom_info())
+    requested = {}
+
+    def _dl_video(repo, rel):
+        requested["rel"] = rel
+        return "fake.mp4"
+
+    monkeypatch.setattr(lh, "_download_video", _dl_video)
+    monkeypatch.setattr(lh, "read_video_frames", lambda path, idxs, size=224: _fake_video(idxs, size))
+
+    lh.assemble(records, labels, out_dir=tmp_path, repo="fake/repo", max_episodes=1)
+
+    expected_rel = custom_template.format(episode_chunk=0, video_key="observation.images.cam_head_rgb", episode_index=0)
+    default_rel = lh.VIDEO_PATH_TEMPLATE.format(episode_chunk=0, video_key="observation.images.cam_head_rgb", episode_index=0)
+    assert requested["rel"] == expected_rel
+    assert requested["rel"] != default_rel
+
+
 def test_assemble_skips_bad_episode_without_partial_rows(tmp_path, monkeypatch):
     records = [_rec(0), _rec(1)]
     labels = [{"episode_id": "0", "memories": ["m1", "m2"]}, {"episode_id": "1", "memories": ["m1", "m2"]}]
@@ -126,6 +158,62 @@ def test_read_video_frames_decodes_requested_indices_and_clamps(tmp_path):
     assert b0 < b5 < b9
     # out-of-range index clamps to the last frame
     assert np.array_equal(frames[20], frames[9])
+
+
+def test_read_video_frames_clamp_ignores_bogus_frame_count_metadata(monkeypatch):
+    """CAP_PROP_FRAME_COUNT can be 0 or wrong for some H.264 containers. Correctness must come from
+    EOF discovered by decoding, not from that metadata -- simulate a capture that lies about having
+    zero frames, then confirm in-range and out-of-range indices still resolve correctly."""
+    cv2 = pytest.importorskip("cv2")
+    frames = [np.full((64, 64, 3), i * 40, np.uint8) for i in range(5)]
+
+    class _FakeCap:
+        def __init__(self, _path):
+            self.pos = -1
+
+        def get(self, prop):
+            return 0  # lies: metadata claims zero frames regardless of what's asked
+
+        def read(self):
+            self.pos += 1
+            if self.pos < len(frames):
+                return True, frames[self.pos].copy()
+            return False, None
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(cv2, "VideoCapture", _FakeCap)
+
+    result = lh.read_video_frames("ignored.mp4", [0, 2, 4, 100], size=64)
+
+    assert set(result) == {0, 2, 4, 100}
+    # out-of-range clamps to the last actually-decoded frame, not to the (bogus) metadata count
+    assert np.array_equal(result[100], result[4])
+    assert not np.array_equal(result[0], result[4])
+
+
+def test_read_video_frames_raises_on_undecodable_video(monkeypatch):
+    """Zero frames ever decoded is a genuine error and must still raise, not silently degenerate."""
+    cv2 = pytest.importorskip("cv2")
+
+    class _EmptyCap:
+        def __init__(self, _path):
+            pass
+
+        def get(self, prop):
+            return 0
+
+        def read(self):
+            return False, None
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(cv2, "VideoCapture", _EmptyCap)
+
+    with pytest.raises(ValueError, match="failed to decode"):
+        lh.read_video_frames("empty.mp4", [0, 3], size=64)
 
 
 def test_read_video_frames_converts_bgr_to_rgb(tmp_path):

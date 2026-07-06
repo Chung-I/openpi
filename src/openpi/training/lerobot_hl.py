@@ -8,8 +8,11 @@ sampling) to build 1 Hz HL samples, and writes a manifest + frames -- the SAME o
 `robomind.assemble`, so downstream training code is dataset-agnostic.
 
 Generic across LeRobot datasets that expose the standard layout
-`videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4`; RoboCOIN uses it
-now, Galaxea will reuse this module later with a different `video_key`.
+`videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4` (`VIDEO_PATH_TEMPLATE`
+below is only the fallback default -- `assemble` prefers `info["video_path"]` from the dataset's own
+`meta/info.json` when present, since layouts vary across datasets); RoboCOIN uses the default layout
+now, Galaxea will reuse this module later with a different `video_key` and possibly a different
+`video_path` template.
 """
 
 import json
@@ -31,30 +34,41 @@ def episode_index_of(record_id: str) -> int:
     return int(m.group(1))
 
 
-def read_video_frames(mp4_path, indices: list[int], size: int = 224) -> dict[int, np.ndarray]:
+def read_video_frames(mp4_path: str | pathlib.Path, indices: list[int], size: int = 224) -> dict[int, np.ndarray]:
     """Decode the requested frame indices from an mp4. Sequential decode (cap.read() forward to
-    each wanted index) since seeking is unreliable on some H.264 streams. Clamps out-of-range
-    indices to the last frame (mirrors robomind.read_camera_top_frames). Returns RGB uint8 frames,
-    letterbox-resized to size x size."""
+    each wanted index) since seeking is unreliable on some H.264 streams. Correctness does NOT
+    depend on CAP_PROP_FRAME_COUNT (unreliable for some H.264 containers -- can be 0 or wrong):
+    indices past EOF are discovered by decoding and clamp to the last successfully decoded frame
+    (mirrors robomind.read_camera_top_frames). Returns RGB uint8 frames, letterbox-resized to
+    size x size, keyed by the ORIGINAL requested indices."""
     import cv2
+
+    if not indices:
+        return {}
 
     cap = cv2.VideoCapture(str(mp4_path))
     try:
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        last = max(total - 1, 0)
-        clamped = [min(max(int(i), 0), last) for i in indices]
-        decoded: dict[int, np.ndarray] = {}
+        wanted = sorted({max(int(i), 0) for i in indices})
+        max_target = wanted[-1]
+        by_pos: dict[int, np.ndarray] = {}
         pos = -1
-        frame = None
-        for target in sorted(set(clamped)):
-            while pos < target:
-                ok, frame = cap.read()
-                if not ok:
-                    raise ValueError(f"failed to decode frame {pos + 1} from {mp4_path}")
-                pos += 1
+        last_frame_bgr = None
+        while pos < max_target:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            pos += 1
+            last_frame_bgr = frame
+            if pos in by_pos or pos not in wanted:
+                continue
             rgb = np.ascontiguousarray(frame[:, :, ::-1])  # BGR -> RGB
-            decoded[target] = rm._resize_with_pad(rgb, size)  # noqa: SLF001
-        return {int(i): decoded[c] for i, c in zip(indices, clamped, strict=True)}
+            by_pos[pos] = rm._resize_with_pad(rgb, size)  # noqa: SLF001
+        if last_frame_bgr is None:
+            raise ValueError(f"failed to decode any frame from {mp4_path}")
+        if pos not in by_pos:  # EOF hit before max_target -> `pos` is the true last decoded frame
+            rgb = np.ascontiguousarray(last_frame_bgr[:, :, ::-1])  # BGR -> RGB
+            by_pos[pos] = rm._resize_with_pad(rgb, size)  # noqa: SLF001
+        return {int(i): by_pos.get(max(int(i), 0), by_pos[pos]) for i in indices}
     finally:
         cap.release()
 
@@ -98,6 +112,7 @@ def assemble(
     info = json.loads(pathlib.Path(_download_meta(repo)).read_text())
     fps = float(info.get("fps", fps_default))
     chunks_size = int(info.get("chunks_size", 1000))
+    video_path_template = info.get("video_path", VIDEO_PATH_TEMPLATE)
 
     rows = []
     for i in range(n):
@@ -106,7 +121,7 @@ def assemble(
         try:
             idx = episode_index_of(rec["id"])
             chunk = idx // chunks_size
-            rel = VIDEO_PATH_TEMPLATE.format(episode_chunk=chunk, video_key=video_key, episode_index=idx)
+            rel = video_path_template.format(episode_chunk=chunk, video_key=video_key, episode_index=idx)
             mp4_path = _download_video(repo, rel)
             samples = rm.build_samples(rec, lab["memories"], fps, sample_hz)
             imgs = read_video_frames(mp4_path, sorted({s["frame"] for s in samples}))

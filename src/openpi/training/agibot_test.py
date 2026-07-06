@@ -49,6 +49,29 @@ def test_record_none_when_label_info_missing():
     assert ab.record_from_episode(REPO, 327, entry) is None
 
 
+def test_record_from_episode_marks_failure_keyword_subtask_as_unsuccessful():
+    entry = _entry(
+        action_config=[
+            {"start_frame": 0, "end_frame": 100, "action_text": "Pick the apple.", "skill": "Pick"},
+            {
+                "start_frame": 100,
+                "end_frame": 200,
+                "action_text": "Grasp failed, attempting recovery of the apple.",
+                "skill": "Pick",
+            },
+            {"start_frame": 200, "end_frame": 300, "action_text": "Place the apple in the cart.", "skill": "Place"},
+        ]
+    )
+    r = ab.record_from_episode(REPO, 327, entry)
+    assert r.subtasks == [
+        "Pick the apple.",
+        "Grasp failed, attempting recovery of the apple.",
+        "Place the apple in the cart.",
+    ]
+    assert r.frame_ranges == [(0, 99), (100, 199), (200, 299)]
+    assert r.success_flags == [True, False, True]
+
+
 def test_record_drops_empty_and_whitespace_action_text_keeps_ranges_aligned():
     entry = _entry(
         action_config=[

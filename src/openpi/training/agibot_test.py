@@ -11,7 +11,7 @@ from openpi.training import agibot as ab
 REPO = "agibot-world/AgiBotWorld-Alpha"
 
 
-def _entry(episode_id=685046, task_name="Pickup items in the supermarket", action_config=None):
+def _entry(episode_id=685046, task_name="Pickup items in the supermarket", action_config=None, key_frame=None):
     if action_config is None:
         action_config = [
             {
@@ -27,11 +27,14 @@ def _entry(episode_id=685046, task_name="Pickup items in the supermarket", actio
                 "skill": "Place",
             },
         ]
+    label_info = {"action_config": action_config}
+    if key_frame is not None:
+        label_info["key_frame"] = key_frame
     return {
         "episode_id": episode_id,
         "task_name": task_name,
         "init_scene_text": "The robot is positioned in front of the fruit stand in the supermarket environment.",
-        "label_info": {"action_config": action_config},
+        "label_info": label_info,
     }
 
 
@@ -61,27 +64,65 @@ def test_record_none_when_label_info_missing():
     assert ab.record_from_episode(REPO, 327, entry) is None
 
 
-def test_record_from_episode_marks_failure_keyword_subtask_as_unsuccessful():
+def test_record_from_episode_marks_key_frame_overlapping_subtask_as_unsuccessful():
     entry = _entry(
         action_config=[
-            {"start_frame": 0, "end_frame": 100, "action_text": "Pick the apple.", "skill": "Pick"},
-            {
-                "start_frame": 100,
-                "end_frame": 200,
-                "action_text": "Grasp failed, attempting recovery of the apple.",
-                "skill": "Pick",
-            },
-            {"start_frame": 200, "end_frame": 300, "action_text": "Place the apple in the cart.", "skill": "Place"},
+            {"start_frame": 0, "end_frame": 200, "action_text": "Pick the apple.", "skill": "Pick"},
+            {"start_frame": 200, "end_frame": 435, "action_text": "Retry the grasp.", "skill": "Pick"},
+            {"start_frame": 435, "end_frame": 600, "action_text": "Place the apple in the cart.", "skill": "Place"},
+        ],
+        key_frame=[{"start": 0, "end": 435, "comment": "Failure recovery"}],
+    )
+    r = ab.record_from_episode(REPO, 327, entry)
+    assert r.subtasks == ["Pick the apple.", "Retry the grasp.", "Place the apple in the cart."]
+    assert r.frame_ranges == [(0, 199), (200, 434), (435, 599)]
+    assert r.success_flags == [False, False, True]
+
+
+def test_record_from_episode_ignores_non_failure_key_frame_comment():
+    entry = _entry(
+        action_config=[
+            {"start_frame": 0, "end_frame": 200, "action_text": "Pick the apple.", "skill": "Pick"},
+            {"start_frame": 200, "end_frame": 400, "action_text": "Place the apple in the cart.", "skill": "Place"},
+        ],
+        key_frame=[{"start": 0, "end": 400, "comment": "Instruction annotation"}],
+    )
+    r = ab.record_from_episode(REPO, 327, entry)
+    assert r.success_flags == [True, True]
+
+
+def test_record_from_episode_no_key_frame_all_success():
+    entry = _entry(
+        action_config=[
+            {"start_frame": 0, "end_frame": 200, "action_text": "Pick the apple.", "skill": "Pick"},
+            {"start_frame": 200, "end_frame": 400, "action_text": "Place the apple in the cart.", "skill": "Place"},
         ]
     )
     r = ab.record_from_episode(REPO, 327, entry)
-    assert r.subtasks == [
-        "Pick the apple.",
-        "Grasp failed, attempting recovery of the apple.",
-        "Place the apple in the cart.",
-    ]
-    assert r.frame_ranges == [(0, 99), (100, 199), (200, 299)]
-    assert r.success_flags == [True, False, True]
+    assert r.success_flags == [True, True]
+
+
+def test_record_from_episode_empty_key_frame_list_all_success():
+    entry = _entry(
+        action_config=[
+            {"start_frame": 0, "end_frame": 200, "action_text": "Pick the apple.", "skill": "Pick"},
+        ],
+        key_frame=[],
+    )
+    r = ab.record_from_episode(REPO, 327, entry)
+    assert r.success_flags == [True]
+
+
+def test_record_from_episode_partial_overlap_key_frame_flags_subtask():
+    entry = _entry(
+        action_config=[
+            {"start_frame": 0, "end_frame": 400, "action_text": "Pick the apple.", "skill": "Pick"},
+            {"start_frame": 435, "end_frame": 619, "action_text": "Place the apple in the cart.", "skill": "Place"},
+        ],
+        key_frame=[{"start": 400, "end": 500, "comment": "Failure recovery"}],
+    )
+    r = ab.record_from_episode(REPO, 327, entry)
+    assert r.success_flags == [True, False]
 
 
 def test_record_drops_empty_and_whitespace_action_text_keeps_ranges_aligned():

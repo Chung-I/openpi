@@ -19,10 +19,14 @@ import json
 import pathlib
 import random
 
-from openpi.training.agibot import FAILURE_KEYWORDS
 from openpi.training.memory_labels import Episode
 
 REPO = "agibot-world/AgiBotWorld-Alpha"
+
+# Keywords whose presence in an action_text mark that subtask as a failure/recovery attempt rather
+# than a successful one. Local to this prompt-eng loader (agibot.py's HL pipeline uses the
+# dataset's own label_info.key_frame annotation instead; see agibot._failure_spans).
+_FAILURE_KEYWORDS = ("failed", "recovery", "retry", "mistake")
 
 
 def goal_from_task_info(obj: dict) -> str:
@@ -34,8 +38,7 @@ def goal_from_task_info(obj: dict) -> str:
 
 def subtasks_and_flags_from_task_info(obj: dict) -> tuple[list[str], list[bool]]:
     # NOTE: can't reuse agibot.kept_action_spans here -- it also extracts start_frame/end_frame,
-    # which this script's action_config entries (text-only annotations) don't carry. FAILURE_KEYWORDS
-    # is still imported from agibot so the keyword list itself stays single-source.
+    # which this script's action_config entries (text-only annotations) don't carry.
     actions = (obj.get("label_info") or {}).get("action_config") or []
     subtasks: list[str] = []
     flags: list[bool] = []
@@ -44,7 +47,7 @@ def subtasks_and_flags_from_task_info(obj: dict) -> tuple[list[str], list[bool]]
         if not text:
             continue
         subtasks.append(text)
-        flags.append(not any(k in text.lower() for k in FAILURE_KEYWORDS))
+        flags.append(not any(k in text.lower() for k in _FAILURE_KEYWORDS))
     return subtasks, flags
 
 

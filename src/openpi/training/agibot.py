@@ -5,16 +5,19 @@ ships an EXPLICIT per-episode `label_info.action_config` list of {start_frame, e
 action_text, skill} spans -- there is nothing to RLE, we just read the spans directly. Spans are
 exclusive-end and contiguous (`end_frame[i] == start_frame[i+1]`, 0 gaps); `frame_ranges` here are
 the inclusive last-active-frame (`end_frame - 1`), matching robocoin/galaxea/robomind's convention.
-AgiBot ships no explicit success/failure field, so success is inferred from FAILURE_KEYWORDS
-appearing in action_text (e.g. failure-recovery subtasks like "grasp failed, retry ..."). This
-mirrors `robomind.record_from_annotation`'s structure (explicit start/end spans) rather than
-robocoin's RLE. The result is the SAME record shape (id, goal, subtasks, frame_ranges,
-success_flags) as `robomind.RobomindRecord`, so `robomind.build_samples` and the memory-label
-generator reuse it unchanged.
+Success/failure comes from the dataset's own `label_info.key_frame` annotation (a list of
+{start, end, comment} spans, raw 30Hz frame indices like action_config); a key_frame entry whose
+comment denotes failure/recovery marks that frame span as a failure region, and any action_config
+subtask whose raw span overlaps a failure span is `success=False`. (`key_frame` is currently absent
+from every released AgiBot file, so today every subtask is `success=True` -- this path exists for
+if/when AgiBot ships the annotation.) This mirrors `robomind.record_from_annotation`'s structure
+(explicit start/end spans) rather than robocoin's RLE. The result is the SAME record shape (id,
+goal, subtasks, frame_ranges, success_flags) as `robomind.RobomindRecord`, so `robomind.build_samples`
+and the memory-label generator reuse it unchanged.
 
 This module is the single source of truth for the action_config parsing schema (kept_action_spans)
-and the failure-keyword success predicate (is_success); `scripts/load_agibot_episodes.py` reuses
-both rather than re-deriving them.
+and the key_frame failure-span predicate (_failure_spans); `scripts/load_agibot_episodes.py` uses
+its own separate keyword heuristic for its own (prompt-eng) purpose.
 
 Each `task_info/task_<task_id>.json` is a flat, individually-downloadable file (a JSON array of
 episode entries) -- no tar download needed for this Stage-A (text-only) loader; `task_id` is not
@@ -30,10 +33,6 @@ import tarfile
 from openpi.training.memory_labels import Episode
 
 _HEAD_VIDEO_MEMBER_RE = re.compile(r"^(?P<episode_id>[^/]+)/videos/(?P<video_key>[^/]+)$")
-
-# Keywords whose presence in an action_text mark that subtask as a failure/recovery attempt rather
-# than a successful one. Exact match with scripts/load_agibot_episodes.py's (former) _FAILURE_KEYWORDS.
-FAILURE_KEYWORDS = ("failed", "recovery", "retry", "mistake")
 
 
 @dataclasses.dataclass
@@ -59,9 +58,17 @@ def kept_action_spans(entry: dict) -> list[tuple[str, int, int]]:
     return spans
 
 
-def is_success(action_text: str) -> bool:
-    """False if action_text contains a failure/recovery keyword (case-insensitive)."""
-    return not any(k in action_text.lower() for k in FAILURE_KEYWORDS)
+def _is_failure_comment(comment: str) -> bool:
+    """True if a key_frame comment denotes a failure/recovery region (case-insensitive)."""
+    c = (comment or "").lower()
+    return "failure" in c or "recovery" in c
+
+
+def _failure_spans(entry: dict) -> list[tuple[int, int]]:
+    """Raw (start, end) frame spans from label_info.key_frame whose comment denotes failure.
+    Empty when key_frame is absent or empty (the current reality for all released AgiBot data)."""
+    key_frame = (entry.get("label_info") or {}).get("key_frame") or []
+    return [(int(k["start"]), int(k["end"])) for k in key_frame if _is_failure_comment(k.get("comment", ""))]
 
 
 def record_from_episode(repo: str, task_id, entry: dict) -> AgibotRecord | None:
@@ -69,9 +76,10 @@ def record_from_episode(repo: str, task_id, entry: dict) -> AgibotRecord | None:
     spans = kept_action_spans(entry)
     if not spans:
         return None
+    failure_spans = _failure_spans(entry)
     subtasks = [text for text, _, _ in spans]
     ranges = [(start, end - 1) for _, start, end in spans]  # exclusive-end -> inclusive
-    success_flags = [is_success(text) for text, _, _ in spans]
+    success_flags = [not any(start < fe and fs < end for fs, fe in failure_spans) for _, start, end in spans]
     return AgibotRecord(
         id=f"{repo}/task_{task_id}/episode_{entry['episode_id']}",
         goal=(entry.get("task_name") or "").strip(),

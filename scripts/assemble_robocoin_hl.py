@@ -36,6 +36,10 @@ def main():
                    help="cap within-subtask HL samples per subtask to this many evenly-spaced frames "
                         "(counters a duration bias where long subtasks otherwise contribute samples "
                         "proportional to their length); default None = uncapped")
+    p.add_argument("--sample-jitter", type=float, default=0.0,
+                   help="seconds of max per-tick uniform noise added to within-subtask sampling times "
+                        "(generation-time; default 0.0 = off, exact range(s, e, stride) grid)")
+    p.add_argument("--seed", type=int, default=0, help="RNG seed for --sample-jitter (deterministic per episode/subtask)")
     args = p.parse_args()
 
     records = json.loads(pathlib.Path(args.records_file).read_text())
@@ -44,6 +48,7 @@ def main():
         records, labels, out_dir=args.out_dir, repo=args.repo, video_key=args.video_key,
         sample_hz=args.sample_hz, max_episodes=args.max_episodes, fps_default=args.fps,
         max_samples_per_subtask=args.max_samples_per_subtask,
+        sample_jitter=args.sample_jitter, seed=args.seed,
     )
 
 

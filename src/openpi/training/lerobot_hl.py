@@ -140,6 +140,8 @@ def assemble(
     fps_default: float = 30.0,
     decode_backend: str = "cv2",
     max_samples_per_subtask: int | None = None,
+    sample_jitter: float = 0.0,
+    seed: int = 0,
 ) -> list[dict]:
     """Assemble HL samples + frames from a LeRobot v2.1 dataset. Exactly one of `repo` (RoboCOIN:
     download meta/info.json + per-episode mp4 from an HF dataset repo) / `video_root` (Galaxea: a
@@ -152,7 +154,9 @@ def assemble(
     {video_key}` layout coexist with Galaxea's info.json-driven template and RoboCOIN's default.
 
     `max_samples_per_subtask`, if given, caps the number of within-subtask samples per subtask to
-    counter duration bias (see `robomind.build_samples` for details)."""
+    counter duration bias (see `robomind.build_samples` for details). `sample_jitter`/`seed` add
+    deterministic generation-time noise to within-subtask sampling times (see `robomind.build_samples`
+    for details); default `sample_jitter=0.0` is off and byte-identical to the pre-jitter grid."""
     from PIL import Image
 
     if (repo is None) == (video_root is None):
@@ -189,7 +193,8 @@ def assemble(
             rel = video_path_template.format(episode_chunk=chunk, video_key=video_key, episode_index=idx)
             mp4_path = video_root / rel if video_root is not None else _download_video(repo, rel)
             samples = rm.build_samples(
-                rec, lab["memories"], fps, sample_hz, max_samples_per_subtask=max_samples_per_subtask
+                rec, lab["memories"], fps, sample_hz, max_samples_per_subtask=max_samples_per_subtask,
+                sample_jitter=sample_jitter, seed=seed,
             )
             imgs = read_video_frames(mp4_path, sorted({s["frame"] for s in samples}), backend=decode_backend)
             stem = rec["id"].replace("/", "_")

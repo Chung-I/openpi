@@ -9,6 +9,7 @@ import dataclasses
 import json
 import pathlib
 import re
+import zlib
 
 import numpy as np
 
@@ -92,6 +93,16 @@ def _capped_within(within: list[int], max_samples_per_subtask: int | None) -> li
     return [within[i] for i in sorted(set(picks.tolist()))]
 
 
+def _jittered_within(nominal: list[int], s: int, e: int, jitter_frames: float, rng: np.random.Generator) -> list[int]:
+    """Perturb each nominal within-frame by uniform noise in `[-jitter_frames, jitter_frames]`,
+    clamped to `[s, e - 1]` (never reaches the boundary frame `e`), then dedup + sort."""
+    jittered = []
+    for f in nominal:
+        jf = f + round(rng.uniform(-jitter_frames, jitter_frames))
+        jittered.append(min(max(jf, s), e - 1))
+    return sorted(set(jittered))
+
+
 def build_samples(
     record: dict,
     memories: list[str],
@@ -99,6 +110,8 @@ def build_samples(
     sample_hz: float = 1.0,
     first_memory: str = "(none yet)",
     max_samples_per_subtask: int | None = None,
+    sample_jitter: float = 0.0,
+    seed: int = 0,
 ) -> list[dict]:
     """1 Hz HL samples: within a subtask the target is (l_i, m_{i-1}) with no update; at the
     boundary frame e_i it is (l_{i+1}, m_i) on success or (l_i, m_{i-1}) on failure (no update).
@@ -106,7 +119,17 @@ def build_samples(
     within-subtask (no-update) samples per subtask to that many evenly-spaced frames (retaining
     the span's first and last frame) -- counters a duration bias where long subtasks otherwise
     contribute samples proportional to their length. Note: cap=1 keeps only the FIRST within-frame
-    (a single slot can't retain both endpoints). The boundary/transition sample is never capped."""
+    (a single slot can't retain both endpoints). The boundary/transition sample is never capped.
+
+    `sample_jitter` (seconds, default 0.0 = off) adds generation-time noise to within-subtask
+    sampling times so ticks land at ~k seconds +/- noise instead of the exact `range(s, e, stride)`
+    grid (which always pins frame `s` and aliases sub-second dynamics). Noise is drawn from a
+    deterministic per-(episode, subtask) RNG seeded from `(seed, episode_id, subtask_index)`, so the
+    resulting manifest is reproducible regardless of processing order. Jittered frames are clamped
+    to `[s, e - 1]` and deduped/sorted; the boundary/transition sample (frame `e`) is never jittered.
+    The cap (if any) is applied AFTER jitter."""
+    if sample_jitter < 0:
+        raise ValueError("sample_jitter must be >= 0")
     if max_samples_per_subtask is not None and max_samples_per_subtask < 1:
         raise ValueError("max_samples_per_subtask must be >= 1")
     subtasks, ranges, flags = record["subtasks"], record["frame_ranges"], record["success_flags"]
@@ -120,7 +143,11 @@ def build_samples(
         m_prev = first_memory if idx == 0 else memories[idx - 1]
         l_cur = subtasks[idx]
         l_next = subtasks[idx + 1] if idx + 1 < n else "done"
-        within = _capped_within(list(range(s, e, stride)), max_samples_per_subtask)
+        nominal = list(range(s, e, stride))
+        if sample_jitter > 0.0:
+            rng = np.random.default_rng(np.random.SeedSequence([seed, zlib.crc32(eid.encode()), idx]))
+            nominal = _jittered_within(nominal, s, e, sample_jitter * fps, rng)
+        within = _capped_within(nominal, max_samples_per_subtask)
         for f in within:
             samples.append(_mk(eid, goal, idx, m_prev, flags[idx], f, False, l_cur, m_prev))  # noqa: FBT003, PERF401
         if flags[idx]:
@@ -199,6 +226,7 @@ def assemble(
     records: list[dict], labels: list[dict], *, out_dir, cache_dir,
     fps_default: float = 10.0, sample_hz: float = 1.0, max_episodes: int | None = None,
     cleanup_parts: bool = False, max_samples_per_subtask: int | None = None,
+    sample_jitter: float = 0.0, seed: int = 0,
 ) -> list[dict]:
     import itertools
     import shutil
@@ -238,7 +266,8 @@ def assemble(
                     raise FileNotFoundError(f"trajectory.hdf5 not found for {rec['id']}")
                 fps = read_fps(h5, fps_default)
                 samples = build_samples(
-                    rec, lab["memories"], fps, sample_hz, max_samples_per_subtask=max_samples_per_subtask
+                    rec, lab["memories"], fps, sample_hz, max_samples_per_subtask=max_samples_per_subtask,
+                    sample_jitter=sample_jitter, seed=seed,
                 )
                 imgs = read_camera_top_frames(h5, sorted({s["frame"] for s in samples}))
                 stem = rec["id"].replace("/", "_")

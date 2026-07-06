@@ -31,13 +31,18 @@ def main():
     p.add_argument("--cleanup-parts", action="store_true",
                    help="delete each task's downloaded ~400GB archive after extraction (needed under a "
                         "storage quota, e.g. the 2.4TB franka_3rgb subset)")
+    p.add_argument("--sample-jitter", type=float, default=0.0,
+                   help="seconds of max per-tick uniform noise added to within-subtask sampling times "
+                        "(generation-time; default 0.0 = off, exact range(s, e, stride) grid)")
+    p.add_argument("--seed", type=int, default=0, help="RNG seed for --sample-jitter (deterministic per episode/subtask)")
     args = p.parse_args()
 
     records = json.loads(pathlib.Path(args.records_file).read_text())
     labels = json.loads(pathlib.Path(args.labels_file).read_text())
     rm.assemble(records, labels, out_dir=args.out_dir, cache_dir=args.cache_dir,
                 fps_default=args.fps, sample_hz=args.sample_hz, max_episodes=args.max_episodes,
-                cleanup_parts=args.cleanup_parts, max_samples_per_subtask=args.max_samples_per_subtask)
+                cleanup_parts=args.cleanup_parts, max_samples_per_subtask=args.max_samples_per_subtask,
+                sample_jitter=args.sample_jitter, seed=args.seed)
 
 
 if __name__ == "__main__":

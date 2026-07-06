@@ -150,6 +150,61 @@ def test_cap_negative_raises():
         rm.build_samples(_rec(), ["m1", "m2", "m3"], fps=10, max_samples_per_subtask=-5)
 
 
+def test_jitter_zero_identical_to_nominal():
+    rec = _long_rec()
+    nominal = rm.build_samples(rec, ["m1"], fps=10, sample_hz=1)
+    jittered = rm.build_samples(rec, ["m1"], fps=10, sample_hz=1, sample_jitter=0.0)
+    assert jittered == nominal
+
+
+def test_jitter_within_bounds_and_unique_sorted():
+    rec = {"id": "epJ", "goal": "g", "subtasks": ["a"], "frame_ranges": [[0, 100]], "success_flags": [True]}
+    s = rm.build_samples(rec, ["m1"], fps=10, sample_hz=1, sample_jitter=0.3, seed=1)
+    w = [x["frame"] for x in s if not x["update"]]
+    assert w == sorted(set(w))  # unique + sorted
+    max_jitter_frames = 0.3 * 10  # 3 frames
+    nominal = list(range(0, 100, 10))
+    for f in w:
+        assert 0 <= f <= 99  # never reaches boundary frame e=100
+        assert any(abs(f - nf) <= max_jitter_frames + 1e-9 for nf in nominal)
+    b = next(x for x in s if x["update"])
+    assert b["frame"] == 100  # boundary sample untouched
+    assert b["update"] is True
+
+
+def test_jitter_deterministic_same_seed():
+    rec = _long_rec()
+    s1 = rm.build_samples(rec, ["m1"], fps=10, sample_hz=1, sample_jitter=0.5, seed=42)
+    s2 = rm.build_samples(rec, ["m1"], fps=10, sample_hz=1, sample_jitter=0.5, seed=42)
+    w1 = [x["frame"] for x in s1 if not x["update"]]
+    w2 = [x["frame"] for x in s2 if not x["update"]]
+    assert w1 == w2
+
+
+def test_jitter_different_seed_generally_differs():
+    rec = _long_rec()
+    s1 = rm.build_samples(rec, ["m1"], fps=10, sample_hz=1, sample_jitter=0.5, seed=1)
+    s2 = rm.build_samples(rec, ["m1"], fps=10, sample_hz=1, sample_jitter=0.5, seed=2)
+    w1 = [x["frame"] for x in s1 if not x["update"]]
+    w2 = [x["frame"] for x in s2 if not x["update"]]
+    assert w1 != w2
+
+
+def test_jitter_stacks_with_cap():
+    rec = _long_rec()
+    s = rm.build_samples(rec, ["m1"], fps=10, sample_hz=1, sample_jitter=0.3, seed=1, max_samples_per_subtask=3)
+    w = [x for x in s if not x["update"]]
+    b = [x for x in s if x["update"]]
+    assert len(w) <= 3
+    assert w == sorted(w, key=lambda x: x["frame"])
+    assert len(b) == 1
+
+
+def test_jitter_negative_raises():
+    with pytest.raises(ValueError, match="sample_jitter"):
+        rm.build_samples(_rec(), ["m1", "m2", "m3"], fps=10, sample_jitter=-0.1)
+
+
 def test_task_of():
     assert rm._task_of("h5_franka_1rgb/bread_in_basket/success_episodes/train/1016_161244/data") == "bread_in_basket"  # noqa: SLF001
 

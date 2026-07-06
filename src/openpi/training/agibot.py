@@ -118,6 +118,9 @@ def extract_task_head_videos(
     path already present) is left untouched and its member is skipped without re-reading tar bytes
     for it. Returns `dest_dir`."""
     dest_dir = pathlib.Path(dest_dir)
+    dest_root = dest_dir.resolve()
+    if episode_ids is not None:
+        episode_ids = {str(e) for e in episode_ids}
     with tarfile.open(tar_path, "r") as tf:
         for member in tf:
             if not member.isfile():
@@ -129,13 +132,18 @@ def extract_task_head_videos(
             if episode_ids is not None and episode_id not in episode_ids:
                 continue
             out_path = dest_dir / episode_id / "videos" / video_key
-            if out_path.exists():
+            resolved = out_path.resolve()
+            if not resolved.is_relative_to(dest_root):
+                # member.name (e.g. episode_id="..") resolves outside dest_dir -- reject a
+                # malicious/corrupt tar member rather than write outside the destination.
                 continue
-            out_path.parent.mkdir(parents=True, exist_ok=True)
+            if resolved.exists():
+                continue
+            resolved.parent.mkdir(parents=True, exist_ok=True)
             src = tf.extractfile(member)
             if src is None:
                 continue
-            with src, out_path.open("wb") as dst:
+            with src, resolved.open("wb") as dst:
                 dst.write(src.read())
     return dest_dir
 

@@ -1,4 +1,5 @@
 import glob
+import io
 import json
 import pathlib
 import tarfile
@@ -176,8 +177,6 @@ def _build_task_tar(tar_path, episode_ids=(685046, 685047)):
 
 
 def _add_bytes(tf, name, data):
-    import io
-
     info = tarfile.TarInfo(name=name)
     info.size = len(data)
     tf.addfile(info, io.BytesIO(data))
@@ -221,3 +220,41 @@ def test_extract_task_head_videos_filters_by_episode_ids(tmp_path):
 
     assert (dest_dir / "685046" / "videos" / "head_color.mp4").exists()
     assert not (dest_dir / "685047").exists()
+
+
+def test_extract_task_head_videos_filters_by_int_episode_ids(tmp_path):
+    """episode_ids may be given as ints (e.g. {685046}); they must be coerced to strings so they
+    still match the string episode_id parsed from the member name -- not silently filter out
+    everything."""
+    tar_path = _build_task_tar(tmp_path / "shard.tar")
+    dest_dir = tmp_path / "extracted"
+
+    ab.extract_task_head_videos(tar_path, dest_dir, episode_ids={685046})
+
+    assert (dest_dir / "685046" / "videos" / "head_color.mp4").exists()
+    assert not (dest_dir / "685047").exists()
+
+
+def test_extract_task_head_videos_rejects_path_traversal_member(tmp_path):
+    """A malicious/corrupt tar member whose path resolves outside dest_dir (e.g. episode_id="..")
+    must be skipped, not extracted -- it must NEVER write outside dest_dir. Legit members alongside
+    it must still extract normally."""
+    tar_path = tmp_path / "shard.tar"
+    with tarfile.open(tar_path, "w") as tf:
+        _add_bytes(tf, "685046/videos/head_color.mp4", b"legit-head-video-bytes")
+        _add_bytes(tf, "../videos/head_color.mp4", b"evil-traversal-bytes")
+        _add_bytes(tf, "/tmp/absolute/videos/head_color.mp4", b"evil-absolute-bytes")
+    dest_dir = tmp_path / "extracted"
+
+    ab.extract_task_head_videos(tar_path, dest_dir)
+
+    # legit member still extracts
+    legit = dest_dir / "685046" / "videos" / "head_color.mp4"
+    assert legit.exists()
+    assert legit.read_bytes() == b"legit-head-video-bytes"
+
+    # the traversal decoy must not have written anything outside dest_dir
+    assert not (tmp_path / "videos").exists()
+    assert not (tmp_path / "extracted" / ".." / "videos" / "head_color.mp4").resolve().exists()
+    # and dest_dir must contain nothing but the legit episode
+    assert [p.name for p in dest_dir.iterdir()] == ["685046"]

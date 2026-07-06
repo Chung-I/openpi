@@ -428,8 +428,19 @@ def test_assemble_agibot_style_video_root_without_info_json(tmp_path, monkeypatc
     monkeypatch.setattr(lh, "_download_meta", _boom)
     monkeypatch.setattr(lh, "_download_video", _boom)
 
-    records = [_rec(0)]
-    labels = [{"episode_id": "0", "memories": ["m1", "m2"]}]
+    # A single subtask spanning [0, 65] (wider than the fps=30 sample stride) so the fps-fallback
+    # actually produces more than one within-subtask sample -- letting us tie a concrete sample's
+    # frame index to fps_default below.
+    records = [
+        {
+            "id": "RoboCOIN/episode_000000",
+            "goal": "g",
+            "subtasks": ["a"],
+            "frame_ranges": [[0, 65]],
+            "success_flags": [True],
+        }
+    ]
+    labels = [{"episode_id": "0", "memories": ["m1"]}]
     out_dir = tmp_path / "out"
     rows = lh.assemble(
         records,
@@ -440,6 +451,7 @@ def test_assemble_agibot_style_video_root_without_info_json(tmp_path, monkeypatc
         video_path_template="{episode_index}/videos/{video_key}",
         decode_backend="cv2",
         fps_default=30.0,
+        sample_hz=1.0,
         max_episodes=1,
     )
 
@@ -449,6 +461,14 @@ def test_assemble_agibot_style_video_root_without_info_json(tmp_path, monkeypatc
     first = json.loads(manifest[0])
     assert first["image"].startswith("frames/")
     assert (out_dir / first["image"]).exists()
+
+    # fps_default=30.0 with sample_hz=1.0 -> stride = round(30.0 / 1.0) = 30, so within the
+    # [0, 65) subtask span the sampled frames must step by 30 (0, 30, 60), plus the boundary
+    # sample at the inclusive end frame (65). If fps_default were ignored (e.g. treated as 1.0),
+    # every frame 0..64 would be sampled instead -- so this pins the fallback fps value itself,
+    # not just that assembly succeeds.
+    frames = sorted(r["frame"] for r in rows)
+    assert frames == [0, 30, 60, 65]
 
 
 def test_assemble_video_path_template_arg_takes_precedence_over_info_json(tmp_path, monkeypatch):

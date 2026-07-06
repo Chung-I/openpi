@@ -43,6 +43,12 @@ def main():
     parser.add_argument("--base_url", type=str, default=None)
     parser.add_argument("--max_concurrency", type=int, default=64)
     parser.add_argument("--out_dir", type=str, default=None, help="per-episode shard dir (resume)")
+    parser.add_argument(
+        "--disable_thinking",
+        action="store_true",
+        help="For reasoning models (e.g. Qwen3): send chat_template_kwargs.enable_thinking=False so the "
+        "model emits the compressed memory directly instead of spending the token budget on <think>.",
+    )
     args = parser.parse_args()
 
     config = MemoryLabelConfig(
@@ -51,6 +57,7 @@ def main():
         max_memory_tokens=args.max_memory_tokens,
         base_url=args.base_url,
         max_concurrency=args.max_concurrency,
+        disable_thinking=args.disable_thinking,
     )
 
     with open(args.episodes_file) as f:

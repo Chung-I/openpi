@@ -134,6 +134,7 @@ def assemble(
     repo: str | None = None,
     video_root: str | pathlib.Path | None = None,
     video_key: str = "observation.images.cam_head_rgb",
+    video_path_template: str | None = None,
     sample_hz: float = 1.0,
     max_episodes: int | None = None,
     fps_default: float = 30.0,
@@ -141,8 +142,13 @@ def assemble(
 ) -> list[dict]:
     """Assemble HL samples + frames from a LeRobot v2.1 dataset. Exactly one of `repo` (RoboCOIN:
     download meta/info.json + per-episode mp4 from an HF dataset repo) / `video_root` (Galaxea: a
-    locally-extracted archive dir -- read meta/info.json and resolve mp4s under it directly, no
-    download) must be given."""
+    locally-extracted LeRobot-layout archive dir with meta/info.json; AgiBot: a locally-extracted
+    RAW (non-LeRobot) layout dir with NO meta/info.json -- resolve mp4s under it directly, no
+    download) must be given.
+
+    `video_path_template`, if given, takes precedence over `info.get("video_path")` and the
+    `VIDEO_PATH_TEMPLATE` default (in that order) -- lets AgiBot's raw `{episode_index}/videos/
+    {video_key}` layout coexist with Galaxea's info.json-driven template and RoboCOIN's default."""
     from PIL import Image
 
     if (repo is None) == (video_root is None):
@@ -161,12 +167,13 @@ def assemble(
 
     if video_root is not None:
         video_root = pathlib.Path(video_root)
-        info = json.loads((video_root / "meta" / "info.json").read_text())
+        info_path = video_root / "meta" / "info.json"
+        info = json.loads(info_path.read_text()) if info_path.exists() else {}
     else:
         info = json.loads(pathlib.Path(_download_meta(repo)).read_text())
     fps = float(info.get("fps", fps_default))
     chunks_size = int(info.get("chunks_size", 1000))
-    video_path_template = info.get("video_path", VIDEO_PATH_TEMPLATE)
+    video_path_template = video_path_template or info.get("video_path", VIDEO_PATH_TEMPLATE)
 
     rows = []
     for i in range(n):

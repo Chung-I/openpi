@@ -389,3 +389,101 @@ def test_assemble_requires_exactly_one_of_repo_or_video_root(tmp_path):
         lh.assemble(records, labels, out_dir=tmp_path)
     with pytest.raises(ValueError, match="exactly one"):
         lh.assemble(records, labels, out_dir=tmp_path, repo="fake/repo", video_root=tmp_path)
+
+
+# --- AgiBot: info-less video_root + explicit video_path_template ---------------------------------
+
+
+def _write_agibot_video_root(tmp_path, video_key="head_color.mp4"):
+    """A tiny AgiBot-shaped fixture: NO meta/info.json, raw layout
+    <episode_id>/videos/<video_key>. Returns the video_root dir (no meta/ subdir at all)."""
+    root = tmp_path / "agibot_video_root"
+    video_dir = root / "0" / "videos"
+    video_dir.mkdir(parents=True)
+    mp4_path = video_dir / video_key
+    writer = _open_writer(mp4_path, (64, 64))
+    if writer is None:
+        return None
+    try:
+        for i in range(10):
+            writer.write(np.full((64, 64, 3), i * 20, np.uint8))
+    finally:
+        writer.release()
+    return root
+
+
+def test_assemble_agibot_style_video_root_without_info_json(tmp_path, monkeypatch):
+    """AgiBot's raw layout has NO meta/info.json: assemble must degrade cleanly (fps from
+    fps_default), resolve the AgiBot-style path via an explicit video_path_template, and never
+    attempt an HF download."""
+    pytest.importorskip("cv2")
+    video_root = _write_agibot_video_root(tmp_path)
+    if video_root is None:
+        pytest.skip("cv2 VideoWriter could not open mp4v codec")
+    assert not (video_root / "meta").exists()
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("must not download when video_root is given")
+
+    monkeypatch.setattr(lh, "_download_meta", _boom)
+    monkeypatch.setattr(lh, "_download_video", _boom)
+
+    records = [_rec(0)]
+    labels = [{"episode_id": "0", "memories": ["m1", "m2"]}]
+    out_dir = tmp_path / "out"
+    rows = lh.assemble(
+        records,
+        labels,
+        out_dir=out_dir,
+        video_root=video_root,
+        video_key="head_color.mp4",
+        video_path_template="{episode_index}/videos/{video_key}",
+        decode_backend="cv2",
+        fps_default=30.0,
+        max_episodes=1,
+    )
+
+    manifest = (out_dir / "manifest.jsonl").read_text().strip().splitlines()
+    assert len(manifest) == len(rows)
+    assert len(rows) > 0
+    first = json.loads(manifest[0])
+    assert first["image"].startswith("frames/")
+    assert (out_dir / first["image"]).exists()
+
+
+def test_assemble_video_path_template_arg_takes_precedence_over_info_json(tmp_path, monkeypatch):
+    """When both an explicit video_path_template arg AND info.json's video_path are present, the
+    arg wins (precedence: arg -> info["video_path"] -> VIDEO_PATH_TEMPLATE)."""
+    pytest.importorskip("cv2")
+    root = tmp_path / "video_root_with_info"
+    meta_dir = root / "meta"
+    meta_dir.mkdir(parents=True)
+    meta_dir.joinpath("info.json").write_text(
+        json.dumps({"fps": 15.0, "chunks_size": 1000, "video_path": lh.VIDEO_PATH_TEMPLATE})
+    )
+    video_dir = root / "0" / "videos"
+    video_dir.mkdir(parents=True)
+    mp4_path = video_dir / "head_color.mp4"
+    writer = _open_writer(mp4_path, (64, 64))
+    if writer is None:
+        pytest.skip("cv2 VideoWriter could not open mp4v codec")
+    try:
+        for i in range(10):
+            writer.write(np.full((64, 64, 3), i * 20, np.uint8))
+    finally:
+        writer.release()
+
+    records = [_rec(0)]
+    labels = [{"episode_id": "0", "memories": ["m1", "m2"]}]
+    out_dir = tmp_path / "out"
+    rows = lh.assemble(
+        records,
+        labels,
+        out_dir=out_dir,
+        video_root=root,
+        video_key="head_color.mp4",
+        video_path_template="{episode_index}/videos/{video_key}",
+        decode_backend="cv2",
+        max_episodes=1,
+    )
+    assert len(rows) > 0

@@ -1,6 +1,7 @@
 import glob
 import json
 import pathlib
+import tarfile
 
 import pytest
 
@@ -12,8 +13,18 @@ REPO = "agibot-world/AgiBotWorld-Alpha"
 def _entry(episode_id=685046, task_name="Pickup items in the supermarket", action_config=None):
     if action_config is None:
         action_config = [
-            {"start_frame": 0, "end_frame": 323, "action_text": "Retrieve shiitake mushroom from the shelf.", "skill": "Pick"},
-            {"start_frame": 323, "end_frame": 444, "action_text": "Place the held shiitake mushroom into the plastic bag in the shopping cart.", "skill": "Place"},
+            {
+                "start_frame": 0,
+                "end_frame": 323,
+                "action_text": "Retrieve shiitake mushroom from the shelf.",
+                "skill": "Pick",
+            },
+            {
+                "start_frame": 323,
+                "end_frame": 444,
+                "action_text": "Place the held shiitake mushroom into the plastic bag in the shopping cart.",
+                "skill": "Place",
+            },
         ]
     return {
         "episode_id": episode_id,
@@ -147,3 +158,66 @@ def test_records_from_task_json_real_task_327():
         # exclusive-end action_config spans are contiguous -> inclusive-end frame_ranges are too
         for (_, end), (start, _) in zip(r.frame_ranges, r.frame_ranges[1:], strict=False):
             assert end + 1 == start
+
+
+# --- extract_task_head_videos ---------------------------------------------------------------------
+
+
+def _build_task_tar(tar_path, episode_ids=(685046, 685047)):
+    """A plain (uncompressed) tar shaped like an AgiBot observations/<task_id>/<shard>.tar: per
+    episode, a head_color.mp4 (to extract) plus decoys (a depth PNG + another camera's mp4) that
+    must be skipped."""
+    with tarfile.open(tar_path, "w") as tf:
+        for eid in episode_ids:
+            _add_bytes(tf, f"{eid}/videos/head_color.mp4", f"head-video-bytes-{eid}".encode())
+            _add_bytes(tf, f"{eid}/depth/0.png", b"depth-png-bytes")
+            _add_bytes(tf, f"{eid}/videos/hand_left_color.mp4", b"hand-video-bytes")
+    return tar_path
+
+
+def _add_bytes(tf, name, data):
+    import io
+
+    info = tarfile.TarInfo(name=name)
+    info.size = len(data)
+    tf.addfile(info, io.BytesIO(data))
+
+
+def test_extract_task_head_videos_extracts_only_head_cam(tmp_path):
+    tar_path = _build_task_tar(tmp_path / "shard.tar")
+    dest_dir = tmp_path / "extracted"
+
+    result = ab.extract_task_head_videos(tar_path, dest_dir)
+
+    assert result == dest_dir
+    for eid in (685046, 685047):
+        head = dest_dir / str(eid) / "videos" / "head_color.mp4"
+        assert head.exists()
+        assert head.read_bytes() == f"head-video-bytes-{eid}".encode()
+        assert not (dest_dir / str(eid) / "depth").exists()
+        assert not (dest_dir / str(eid) / "videos" / "hand_left_color.mp4").exists()
+
+
+def test_extract_task_head_videos_is_idempotent(tmp_path):
+    tar_path = _build_task_tar(tmp_path / "shard.tar")
+    dest_dir = tmp_path / "extracted"
+
+    ab.extract_task_head_videos(tar_path, dest_dir)
+    head = dest_dir / "685046" / "videos" / "head_color.mp4"
+    mtime_first = head.stat().st_mtime_ns
+
+    # rerun must not error and must leave the already-extracted file intact
+    ab.extract_task_head_videos(tar_path, dest_dir)
+    assert head.exists()
+    assert head.read_bytes() == b"head-video-bytes-685046"
+    assert head.stat().st_mtime_ns == mtime_first
+
+
+def test_extract_task_head_videos_filters_by_episode_ids(tmp_path):
+    tar_path = _build_task_tar(tmp_path / "shard.tar")
+    dest_dir = tmp_path / "extracted"
+
+    ab.extract_task_head_videos(tar_path, dest_dir, episode_ids={"685046"})
+
+    assert (dest_dir / "685046" / "videos" / "head_color.mp4").exists()
+    assert not (dest_dir / "685047").exists()

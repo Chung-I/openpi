@@ -24,8 +24,12 @@ present in the JSON itself and must be supplied by the caller (filename/CLI arg)
 import dataclasses
 import json
 import pathlib
+import re
+import tarfile
 
 from openpi.training.memory_labels import Episode
+
+_HEAD_VIDEO_MEMBER_RE = re.compile(r"^(?P<episode_id>[^/]+)/videos/(?P<video_key>[^/]+)$")
 
 # Keywords whose presence in an action_text mark that subtask as a failure/recovery attempt rather
 # than a successful one. Exact match with scripts/load_agibot_episodes.py's (former) _FAILURE_KEYWORDS.
@@ -98,3 +102,62 @@ def records_from_repo(repo: str, task_id, max_episodes: int | None = None) -> li
 
 def to_episode(rec: AgibotRecord) -> Episode:
     return Episode(goal=rec.goal, subtasks=list(rec.subtasks), success_flags=list(rec.success_flags))
+
+
+def extract_task_head_videos(
+    tar_path: str | pathlib.Path,
+    dest_dir: str | pathlib.Path,
+    video_key: str = "head_color.mp4",
+    episode_ids: set[str] | None = None,
+) -> pathlib.Path:
+    """Stream an AgiBot observation `.tar` (`observations/{task_id}/*.tar`, per-episode dirs of the
+    form `<episode_id>/videos/<cam>.mp4` + `<episode_id>/depth/*.png`) and extract ONLY the
+    `<episode_id>/videos/{video_key}` members -- skip depth PNGs and other cameras, which dominate
+    the tar's size -- into `dest_dir/<episode_id>/videos/{video_key}`. If `episode_ids` is given
+    (as strings), extract only those episodes. Idempotent: an already-extracted file (same dest
+    path already present) is left untouched and its member is skipped without re-reading tar bytes
+    for it. Returns `dest_dir`."""
+    dest_dir = pathlib.Path(dest_dir)
+    with tarfile.open(tar_path, "r") as tf:
+        for member in tf:
+            if not member.isfile():
+                continue
+            m = _HEAD_VIDEO_MEMBER_RE.match(member.name)
+            if not m or m.group("video_key") != video_key:
+                continue
+            episode_id = m.group("episode_id")
+            if episode_ids is not None and episode_id not in episode_ids:
+                continue
+            out_path = dest_dir / episode_id / "videos" / video_key
+            if out_path.exists():
+                continue
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            src = tf.extractfile(member)
+            if src is None:
+                continue
+            with src, out_path.open("wb") as dst:
+                dst.write(src.read())
+    return dest_dir
+
+
+def download_task_tars(repo: str, task_id, cache_dir: str | pathlib.Path | None = None) -> list[pathlib.Path]:
+    """Download every `observations/{task_id}/*.tar` shard from `repo` to the local HF cache
+    (or `cache_dir` if given) and return their local paths.
+
+    Size caveat: per-task observation tars can be up to ~48GB and a task may span multiple shard
+    tars; this downloads each matched shard whole (no partial/streaming download of a single
+    video member) -- scope which tasks you call this for. Pair with `extract_task_head_videos`
+    to keep only head-cam video on disk after extraction; the downloaded tar itself can then be
+    deleted."""
+    import huggingface_hub
+
+    api = huggingface_hub.HfApi()
+    prefix = f"observations/{task_id}/"
+    filenames = [
+        f for f in api.list_repo_files(repo, repo_type="dataset") if f.startswith(prefix) and f.endswith(".tar")
+    ]
+    paths = []
+    for filename in filenames:
+        p = huggingface_hub.hf_hub_download(repo, repo_type="dataset", filename=filename, cache_dir=cache_dir)
+        paths.append(pathlib.Path(p))
+    return paths

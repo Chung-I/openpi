@@ -83,12 +83,30 @@ def _mk(eid, goal, idx, m_prev, success, frame, update, tgt_sub, tgt_mem):
     }
 
 
+def _capped_within(within: list[int], max_samples_per_subtask: int | None) -> list[int]:
+    """Subsample `within` (within-subtask frames) to at most `max_samples_per_subtask` evenly-spaced
+    frames, retaining the first and last. No-op if the cap is None or already satisfied."""
+    if max_samples_per_subtask is None or len(within) <= max_samples_per_subtask:
+        return within
+    picks = np.linspace(0, len(within) - 1, max_samples_per_subtask).round().astype(int)
+    return [within[i] for i in sorted(set(picks.tolist()))]
+
+
 def build_samples(
-    record: dict, memories: list[str], fps: float, sample_hz: float = 1.0, first_memory: str = "(none yet)"
+    record: dict,
+    memories: list[str],
+    fps: float,
+    sample_hz: float = 1.0,
+    first_memory: str = "(none yet)",
+    max_samples_per_subtask: int | None = None,
 ) -> list[dict]:
     """1 Hz HL samples: within a subtask the target is (l_i, m_{i-1}) with no update; at the
     boundary frame e_i it is (l_{i+1}, m_i) on success or (l_i, m_{i-1}) on failure (no update).
-    Last subtask advances to "done"."""
+    Last subtask advances to "done". `max_samples_per_subtask`, if given, caps the number of
+    within-subtask (no-update) samples per subtask to that many evenly-spaced frames (retaining
+    the span's first and last frame) -- counters a duration bias where long subtasks otherwise
+    contribute samples proportional to their length. The boundary/transition sample is never
+    capped."""
     subtasks, ranges, flags = record["subtasks"], record["frame_ranges"], record["success_flags"]
     goal, eid, n = record["goal"], record["id"], len(record["subtasks"])
     if len(memories) != n:
@@ -100,7 +118,8 @@ def build_samples(
         m_prev = first_memory if idx == 0 else memories[idx - 1]
         l_cur = subtasks[idx]
         l_next = subtasks[idx + 1] if idx + 1 < n else "done"
-        for f in range(s, e, stride):
+        within = _capped_within(list(range(s, e, stride)), max_samples_per_subtask)
+        for f in within:
             samples.append(_mk(eid, goal, idx, m_prev, flags[idx], f, False, l_cur, m_prev))  # noqa: FBT003, PERF401
         if flags[idx]:
             samples.append(_mk(eid, goal, idx, m_prev, flags[idx], e, True, l_next, memories[idx]))  # noqa: FBT003
@@ -177,7 +196,7 @@ def read_camera_top_frames(h5_path: str, indices: list[int], size: int = 224) ->
 def assemble(
     records: list[dict], labels: list[dict], *, out_dir, cache_dir,
     fps_default: float = 10.0, sample_hz: float = 1.0, max_episodes: int | None = None,
-    cleanup_parts: bool = False,
+    cleanup_parts: bool = False, max_samples_per_subtask: int | None = None,
 ) -> list[dict]:
     import itertools
     import shutil
@@ -216,7 +235,9 @@ def assemble(
                 if h5 is None:
                     raise FileNotFoundError(f"trajectory.hdf5 not found for {rec['id']}")
                 fps = read_fps(h5, fps_default)
-                samples = build_samples(rec, lab["memories"], fps, sample_hz)
+                samples = build_samples(
+                    rec, lab["memories"], fps, sample_hz, max_samples_per_subtask=max_samples_per_subtask
+                )
                 imgs = read_camera_top_frames(h5, sorted({s["frame"] for s in samples}))
                 stem = rec["id"].replace("/", "_")
                 ep_rows = []

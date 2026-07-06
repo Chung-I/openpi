@@ -39,6 +39,10 @@ def main():
     p.add_argument("--fps", type=float, default=15.0)
     p.add_argument("--sample-hz", type=float, default=1.0)
     p.add_argument("--max-episodes", type=int, default=None)
+    p.add_argument("--max-samples-per-subtask", type=int, default=None,
+                   help="cap within-subtask HL samples per subtask to this many evenly-spaced frames "
+                        "(counters a duration bias where long subtasks otherwise contribute samples "
+                        "proportional to their length); default None = uncapped")
     args = p.parse_args()
 
     records = json.loads(pathlib.Path(args.records_file).read_text())
@@ -53,6 +57,7 @@ def main():
         max_episodes=args.max_episodes,
         fps_default=args.fps,
         decode_backend=args.decode_backend,
+        max_samples_per_subtask=args.max_samples_per_subtask,
     )
 
 

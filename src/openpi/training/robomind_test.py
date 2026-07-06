@@ -89,6 +89,55 @@ def test_memories_length_mismatch_raises():
         rm.build_samples(_rec(), ["m1", "m2"], fps=10)
 
 
+def _long_rec():
+    return {"id": "ep1", "goal": "g", "subtasks": ["a"], "frame_ranges": [[0, 100]], "success_flags": [True]}
+
+
+def test_cap_reduces_long_subtask_to_evenly_spaced_within_samples():
+    s = rm.build_samples(_long_rec(), ["m1"], fps=10, sample_hz=1, max_samples_per_subtask=3)
+    w = [x for x in s if not x["update"]]
+    b = [x for x in s if x["update"]]
+    assert [x["frame"] for x in w] == [0, 40, 90]  # evenly spread, retains first + last within-frame
+    assert len(b) == 1
+
+
+def test_cap_leaves_under_cap_subtask_unchanged():
+    rec = {"id": "ep1", "goal": "g", "subtasks": ["a"], "frame_ranges": [[0, 20]], "success_flags": [True]}
+    s = rm.build_samples(rec, ["m1"], fps=10, sample_hz=1, max_samples_per_subtask=5)
+    w = [x for x in s if not x["update"]]
+    b = [x for x in s if x["update"]]
+    assert [x["frame"] for x in w] == [0, 10]
+    assert len(b) == 1
+
+
+def test_default_none_identical_to_uncapped():
+    rec = _long_rec()
+    uncapped = rm.build_samples(rec, ["m1"], fps=10, sample_hz=1)
+    default = rm.build_samples(rec, ["m1"], fps=10, sample_hz=1, max_samples_per_subtask=None)
+    assert default == uncapped
+
+
+def test_cap_does_not_touch_boundary_sample():
+    s = rm.build_samples(_long_rec(), ["m1"], fps=10, sample_hz=1, max_samples_per_subtask=3)
+    b = next(x for x in s if x["update"])
+    assert b["frame"] == 100
+    assert b["update"] is True
+    assert b["target_subtask"] == "done"
+    assert b["target_memory"] == "m1"
+
+
+def test_cap_applied_per_subtask_independently():
+    rec = {
+        "id": "ep1", "goal": "g", "subtasks": ["a", "b"],
+        "frame_ranges": [[0, 100], [100, 120]], "success_flags": [True, True],
+    }
+    s = rm.build_samples(rec, ["m1", "m2"], fps=10, sample_hz=1, max_samples_per_subtask=3)
+    w1 = [x["frame"] for x in s if x["subtask_index"] == 1 and not x["update"]]
+    w2 = [x["frame"] for x in s if x["subtask_index"] == 2 and not x["update"]]
+    assert w1 == [0, 40, 90]  # capped to 3
+    assert w2 == [100, 110]  # under cap (2 within-samples), unchanged
+
+
 def test_task_of():
     assert rm._task_of("h5_franka_1rgb/bread_in_basket/success_episodes/train/1016_161244/data") == "bread_in_basket"  # noqa: SLF001
 

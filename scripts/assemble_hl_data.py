@@ -24,6 +24,10 @@ def main():
     p.add_argument("--fps", type=float, default=10.0)
     p.add_argument("--sample-hz", type=float, default=1.0)
     p.add_argument("--max-episodes", type=int, default=None)
+    p.add_argument("--max-samples-per-subtask", type=int, default=None,
+                   help="cap within-subtask HL samples per subtask to this many evenly-spaced frames "
+                        "(counters a duration bias where long subtasks otherwise contribute samples "
+                        "proportional to their length); default None = uncapped")
     p.add_argument("--cleanup-parts", action="store_true",
                    help="delete each task's downloaded ~400GB archive after extraction (needed under a "
                         "storage quota, e.g. the 2.4TB franka_3rgb subset)")
@@ -33,7 +37,7 @@ def main():
     labels = json.loads(pathlib.Path(args.labels_file).read_text())
     rm.assemble(records, labels, out_dir=args.out_dir, cache_dir=args.cache_dir,
                 fps_default=args.fps, sample_hz=args.sample_hz, max_episodes=args.max_episodes,
-                cleanup_parts=args.cleanup_parts)
+                cleanup_parts=args.cleanup_parts, max_samples_per_subtask=args.max_samples_per_subtask)
 
 
 if __name__ == "__main__":

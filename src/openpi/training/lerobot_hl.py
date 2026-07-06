@@ -139,6 +139,7 @@ def assemble(
     max_episodes: int | None = None,
     fps_default: float = 30.0,
     decode_backend: str = "cv2",
+    max_samples_per_subtask: int | None = None,
 ) -> list[dict]:
     """Assemble HL samples + frames from a LeRobot v2.1 dataset. Exactly one of `repo` (RoboCOIN:
     download meta/info.json + per-episode mp4 from an HF dataset repo) / `video_root` (Galaxea: a
@@ -184,7 +185,9 @@ def assemble(
             chunk = idx // chunks_size
             rel = video_path_template.format(episode_chunk=chunk, video_key=video_key, episode_index=idx)
             mp4_path = video_root / rel if video_root is not None else _download_video(repo, rel)
-            samples = rm.build_samples(rec, lab["memories"], fps, sample_hz)
+            samples = rm.build_samples(
+                rec, lab["memories"], fps, sample_hz, max_samples_per_subtask=max_samples_per_subtask
+            )
             imgs = read_video_frames(mp4_path, sorted({s["frame"] for s in samples}), backend=decode_backend)
             stem = rec["id"].replace("/", "_")
             ep_rows = []

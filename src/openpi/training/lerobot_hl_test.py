@@ -114,6 +114,22 @@ def test_assemble_skips_bad_episode_without_partial_rows(tmp_path, monkeypatch):
     assert all(r["episode_id"] == "RoboCOIN/episode_000000" for r in rows)
 
 
+def test_assemble_raises_when_all_episodes_skipped(tmp_path, monkeypatch):
+    """If all episodes fail, assemble must raise RuntimeError before writing an empty manifest."""
+    records = [_rec(0), _rec(1)]
+    labels = [{"episode_id": "0", "memories": ["m1", "m2"]}, {"episode_id": "1", "memories": ["m1", "m2"]}]
+    monkeypatch.setattr(lh, "_download_meta", lambda repo: _write_info(tmp_path))
+    monkeypatch.setattr(lh, "_download_video", lambda repo, rel: "fake.mp4")
+    # Always raise to simulate all episodes failing
+    monkeypatch.setattr(lh, "read_video_frames", lambda path, idxs, size=224: (_ for _ in ()).throw(RuntimeError("decode failed")))
+
+    with pytest.raises(RuntimeError, match="all.*skipped"):
+        lh.assemble(records, labels, out_dir=tmp_path, repo="fake/repo")
+
+    # Manifest should NOT have been written when all episodes were skipped
+    assert not (tmp_path / "manifest.jsonl").exists()
+
+
 def _write_info(tmp_path):
     p = tmp_path / "info.json"
     p.write_text(json.dumps({"fps": 30.0, "chunks_size": 1000, "video_path": lh.VIDEO_PATH_TEMPLATE}))

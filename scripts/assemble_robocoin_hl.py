@@ -8,8 +8,8 @@ Stage A first (build records from a RoboCOIN task repo):
     json.dump([r.__dict__ for r in records], open('data/robocoin_records.json', 'w'))
     "
 Then Stage B (reuse the existing generator to produce labels):
-    uv run python scripts/generate_memory_labels.py --episodes_file data/robocoin_records.json \
-        --backend openai --base_url http://localhost:8000/v1 --model Qwen/Qwen3.6-27B \
+    uv run python scripts/generate_memory_labels.py --episodes_file data/robocoin_episodes.json \
+        --backend openai --base_url http://localhost:8000/v1 --model Qwen/Qwen2.5-VL-72B-Instruct \
         --output data/robocoin_labels.json --disable_thinking
 Then Stage C (this script):
     uv run python scripts/assemble_robocoin_hl.py --records_file data/robocoin_records.json \

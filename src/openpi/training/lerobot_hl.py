@@ -137,6 +137,9 @@ def assemble(
             continue
         rows.extend(ep_rows)
 
+    if n > 0 and not rows:
+        raise RuntimeError(f"all {n} episodes were skipped - 0 HL samples produced (check repo/video_key/video_path template)")
+
     (out_dir / "manifest.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     print(f"Wrote {len(rows)} HL samples -> {out_dir / 'manifest.jsonl'}")
     return rows

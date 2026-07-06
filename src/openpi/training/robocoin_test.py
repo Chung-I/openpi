@@ -163,3 +163,57 @@ def test_records_from_local_skips_all_sentinel_episode(tmp_path):
     recs = rc.records_from_local(tmp_path)
     assert len(recs) == 1
     assert recs[0].goal == "b"
+
+
+def test_records_from_repo_downloads_scope_only_needed_files(tmp_path, monkeypatch):
+    """Regression: records_from_repo must NOT snapshot the whole GB-scale repo.
+
+    Should download only: meta/info.json, annotations/subtask_annotations.jsonl,
+    meta/episodes.jsonl, and exactly one parquet per episode up to max_episodes.
+    """
+    # Build a small fixture with 3 episodes in tmp_path.
+    _write_lerobot_fixture(
+        tmp_path,
+        [
+            (["task 0"], [(3, 5), (1, 3)]),
+            (["task 1"], [(1, 4)]),
+            (["task 2"], [(2, 3)]),
+        ],
+    )
+
+    # Track every hf_hub_download call.
+    downloaded_files = []
+
+    def fake_hf_download(repo: str, repo_type: str, filename: str):
+        """Return a pathlib.Path to the local fixture file."""
+        downloaded_files.append(filename)
+        return tmp_path / filename
+
+    def fake_snapshot_download(*args, **kwargs):
+        """Snapshot download should never be called."""
+        raise RuntimeError("snapshot_download should not be called by records_from_repo")
+
+    # Monkeypatch the hub functions.
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_hf_download)
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+
+    # Call records_from_repo with max_episodes=2 (should fetch only first 2 episodes).
+    recs = rc.records_from_repo("test_repo", max_episodes=2)
+
+    # Verify we got 2 records (episodes 0 and 1 both have non-sentinel subtasks).
+    assert len(recs) == 2
+    assert recs[0].id.endswith("episode_000000")
+    assert recs[1].id.endswith("episode_000001")
+
+    # Verify the exact set of downloaded files.
+    expected_files = {
+        "meta/info.json",
+        "annotations/subtask_annotations.jsonl",
+        "meta/episodes.jsonl",
+        "data/chunk-000/episode_000000.parquet",
+        "data/chunk-000/episode_000001.parquet",
+    }
+    assert set(downloaded_files) == expected_files
+    assert len(downloaded_files) == 5  # Exactly 5 downloads.
+    # Verify episode 2 was NOT downloaded.
+    assert "episode_000002.parquet" not in str(downloaded_files)

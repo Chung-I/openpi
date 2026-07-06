@@ -74,8 +74,7 @@ def to_episode(rec: RobocoinRecord) -> Episode:
 
 def load_vocab(path) -> dict[int, str]:
     """subtask_index -> subtask text from a RoboCOIN annotations/subtask_annotations.jsonl."""
-    rows = (json.loads(line) for line in pathlib.Path(path).read_text().splitlines() if line.strip())
-    return {r["subtask_index"]: r["subtask"] for r in rows}
+    return {r["subtask_index"]: r["subtask"] for r in _read_jsonl(path)}
 
 
 def _read_jsonl(path) -> list[dict]:
@@ -100,7 +99,7 @@ def _build_records(info, vocab, episodes, resolve_parquet, repo: str) -> list[Ro
     out: list[RobocoinRecord] = []
     for ep in episodes:
         idx = int(ep["episode_index"])
-        goal = "; ".join(t.strip() for t in ep.get("tasks", []) if t.strip())
+        goal = "; ".join(t for t in ep.get("tasks", []) if t)
         labels = _read_primary_labels(resolve_parquet(_parquet_rel(info, idx)))
         rec = record_from_episode(f"{repo}/episode_{idx:06d}", labels, goal, vocab)
         if rec is not None:

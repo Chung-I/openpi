@@ -49,6 +49,14 @@ def main():
         help="For reasoning models (e.g. Qwen3): send chat_template_kwargs.enable_thinking=False so the "
         "model emits the compressed memory directly instead of spending the token budget on <think>.",
     )
+    parser.add_argument(
+        "--generation_mode",
+        choices=["stateless", "recursive"],
+        default="recursive",
+        help="stateless: each timestep re-summarizes the full history independently (parallel). "
+        "recursive: MEM-faithful first-person rolling memory m_t=f(m_{t-1}, event), discards failed "
+        "subtasks (sequential per episode).",
+    )
     args = parser.parse_args()
 
     config = MemoryLabelConfig(
@@ -58,6 +66,7 @@ def main():
         base_url=args.base_url,
         max_concurrency=args.max_concurrency,
         disable_thinking=args.disable_thinking,
+        generation_mode=args.generation_mode,
     )
 
     with open(args.episodes_file) as f:

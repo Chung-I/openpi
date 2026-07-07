@@ -47,17 +47,17 @@ Rules:
 
 Example (compression):
 Goal: put the bowls in the cabinet. Current memory: I placed a light green bowl and a dark blue bowl in the top right cabinet.
-New event: [SUCCESS] place the bright yellow bowl in the top right cabinet.
+Subtask: [SUCCESS] place the bright yellow bowl in the top right cabinet.
 Updated memory: I placed three bowls in the top right cabinet.
 
 Example (failed attempt -> no update):
 Goal: pick the vegetables. Current memory: I picked up the eggplant and placed it in the plate.
-New event: [FAILED] pick up the corn.
+Subtask: [FAILED] pick up the corn.
 Updated memory: I picked up the eggplant and placed it in the plate.
 
 Goal: {goal}
 Current memory: {previous_memory}
-New event: {new_event}
+Subtask: {new_event}
 Updated memory:"""
 
 
@@ -88,7 +88,7 @@ class MemoryLabelConfig:
     disable_thinking: bool = False
     # Prompt + generation controls for the bake-off harness.
     prompt_template: str | None = None  # overrides the module template when set
-    generation_mode: Literal["stateless", "recursive"] = "stateless"
+    generation_mode: Literal["stateless", "recursive"] = "recursive"
     temperature: float = 0.0
 
     @property

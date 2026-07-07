@@ -46,12 +46,14 @@ Rules:
 - If the current memory is "(none yet)", begin the summary from this event.
 
 Example (compression):
-Goal: put the bowls in the cabinet. Current memory: I placed a light green bowl and a dark blue bowl in the top right cabinet.
+Goal: put the bowls in the cabinet.
+Current memory: I placed a light green bowl and a dark blue bowl in the top right cabinet.
 Subtask: [SUCCESS] place the bright yellow bowl in the top right cabinet.
 Updated memory: I placed three bowls in the top right cabinet.
 
 Example (failed attempt -> no update):
-Goal: pick the vegetables. Current memory: I picked up the eggplant and placed it in the plate.
+Goal: pick the vegetables.
+Current memory: I picked up the eggplant and placed it in the plate.
 Subtask: [FAILED] pick up the corn.
 Updated memory: I picked up the eggplant and placed it in the plate.
 

@@ -44,12 +44,21 @@ Rules:
 - Drop details no longer needed for future steps; keep state that affects completion (e.g., a
   drawer/fridge left open that must be closed).
 - If the current memory is "(none yet)", begin the summary from this event.
+- NEVER output "(none yet)" as the updated memory once a subtask has occurred. "(none yet)" is
+  ONLY the initial placeholder. Even if the subtask undoes an earlier action or returns an item to
+  its original position, describe what was done in first person - do not collapse to an empty memory.
 
 Example (compression):
 Goal: put the bowls in the cabinet.
 Current memory: I placed a light green bowl and a dark blue bowl in the top right cabinet.
 Subtask: [SUCCESS] place the bright yellow bowl in the top right cabinet.
 Updated memory: I placed three bowls in the top right cabinet.
+
+Example (undo/return -> still describe, never "(none yet)"):
+Goal: pick and place items on the shelf.
+Current memory: I picked up the third snack from the right on the first shelf.
+Subtask: [SUCCESS] return the snack to its original position.
+Updated memory: I picked up the third snack from the first shelf and returned it to its original position.
 
 Example (failed attempt -> no update):
 Goal: pick the vegetables.

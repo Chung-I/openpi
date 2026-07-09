@@ -44,6 +44,13 @@ def test_english_strips_whitespace():
     assert gx.english("中文@  Turn on the light. ") == "Turn on the light."
 
 
+def test_english_none_label_is_empty_and_sentinel():
+    """Regression: some Galaxea task vocabs carry a None entry for an unlabeled index.
+    english(None) must not crash, and "" must be treated as a sentinel (so it's dropped)."""
+    assert gx.english(None) == ""
+    assert gx.is_sentinel(gx.english(None))
+
+
 # --- record_from_episode -------------------------------------------------------------------------
 
 

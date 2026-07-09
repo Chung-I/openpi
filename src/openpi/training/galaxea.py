@@ -41,15 +41,21 @@ class GalaxeaRecord:
     success_flags: list[bool]
 
 
-def english(text: str) -> str:
-    """The English side of a bilingual `中文@English` vocab string; unchanged if there's no '@'."""
+def english(text: str | None) -> str:
+    """The English side of a bilingual `中文@English` vocab string; unchanged if there's no '@'.
+
+    A missing label (`None`) yields "" — treated as a sentinel by `is_sentinel` and thus dropped.
+    (Some Galaxea task vocabs carry a `None` entry for an unlabeled task/subtask index.)
+    """
+    if text is None:
+        return ""
     if "@" in text:
         return text.split("@", 1)[1].strip()
     return text.strip()
 
 
 def is_sentinel(text: str) -> bool:
-    return text.strip().lower() in GALAXEA_SENTINELS
+    return text.strip() == "" or text.strip().lower() in GALAXEA_SENTINELS
 
 
 def _goal_from_coarse(coarse_task_index, vocab: dict[int, str]) -> str:

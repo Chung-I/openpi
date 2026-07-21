@@ -9,7 +9,7 @@ data. Design: `docs/superpowers/specs/2026-07-21-pi05-layer-truncation-design.md
 | config | layers | role |
 |---|---|---|
 | `pi05_droid_jointpos_trunc6` | 6 of 18 | the truncated model under test |
-| `pi05_droid_jointpos_trunc18` | all 18 | control; isolates truncation from finetuning |
+| `pi05_droid_jointpos_trunc18` | all 18 | control; removes finetuning as a confound (but see the caveat in §5 — it does not isolate depth alone) |
 
 Everything except `keep_layers` is identical, enforced by
 `src/openpi/training/config_test.py::test_arms_share_every_hyperparameter_but_depth`.

@@ -31,7 +31,7 @@ follow-up that this project's results should inform, not precede.
 | Layers kept | `(0, 3, 7, 11, 14, 17)`, configurable | Strided and inclusive of layer 17, so `final_norm` and the flow head still see the activations they were trained on. The field takes any index list, so alternatives need no code change. |
 | Objective | plain pi0.5 flow loss | Reuses `scripts/train.py` untouched. Distillation is the escalation, not the starting point. |
 | Trainable | LoRA adapters only | Matches the validated d-eval recipe. |
-| Control | depth-18 LoRA arm | Isolates truncation from finetuning. |
+| Control | depth-18 LoRA arm | Removes finetuning as a confound. Note it does not fully isolate depth: LoRA adapters sit inside the scanned block, so the 6-layer arm also carries a third of the control's adapter capacity. |
 
 ## Architecture
 

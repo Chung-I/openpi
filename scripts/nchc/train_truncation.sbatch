@@ -3,8 +3,13 @@
 #SBATCH --account=MST114563
 #SBATCH --partition=8gpus
 #SBATCH --gres=gpu:8
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=400G
+#SBATCH --cpus-per-task=64
+# 1200G, not 400G. Each arm's tf.data shuffle buffer holds 250k DROID timesteps and fills
+# PROGRESSIVELY, so the two arms together reached 418G RSS about 32 minutes in, blew past a
+# 400G allocation, and thrashed with all 8 GPUs at 0% for hours -- Slurm still reporting
+# RUNNING the whole time. NCHC's fairness rule allows 200G and 12 cores PER GPU, so an
+# 8-GPU job may ask for up to 1600G/96 cores; 1200G leaves headroom without hogging.
+#SBATCH --mem=1200G
 #SBATCH --time=48:00:00
 #SBATCH --output=/work/roboleon1295/openpi/logs/trunc_%j.log
 set -x

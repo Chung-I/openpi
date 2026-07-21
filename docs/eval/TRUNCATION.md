@@ -105,6 +105,21 @@ rather than after the checkpoint downloads.
 Watch the first 100 steps in wandb (project `layer-truncation`). Arm A starting far above
 arm B and failing to descend means LoRA is not bridging the depth cut — see Escalation.
 
+**If the job hangs with GPUs at 0% while Slurm still reports RUNNING, it is memory.** Each
+arm's `tf.data` shuffle buffer holds 250k DROID timesteps and fills *progressively*, so the
+job trains normally for ~30 minutes and only then thrashes. A 400G allocation was not
+enough for two arms (they reached 418G RSS combined); the script now requests 1200G, within
+NCHC's 200G-per-GPU rule. Diagnose from the login node — you cannot ssh to compute nodes:
+
+```bash
+srun --jobid=<id> --overlap -n1 -N1 nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv,noheader
+srun --jobid=<id> --overlap -n1 -N1 bash -c "ps -eo pid,etime,pcpu,rss,stat,cmd | grep [t]rain.py"
+```
+
+If memory is still the binding constraint, shrink the buffer without a code change:
+`DROID_SHUFFLE_BUFFER=100000 sbatch scripts/nchc/train_truncation.sbatch`. Keep it at or
+above ~100k; below that, shuffling is not sufficiently random.
+
 Neither arm's `TrainConfig` sets `resume` or `overwrite`. If the 48h wall-clock limit is hit
 and Slurm requeues the job, training restarts at step 0 by default and then fails on the
 already-existing checkpoint directory from the previous attempt. If requeuing after a

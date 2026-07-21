@@ -125,6 +125,44 @@ and Slurm requeues the job, training restarts at step 0 by default and then fail
 already-existing checkpoint directory from the previous attempt. If requeuing after a
 timeout, the operator should set `resume=True` (and not `overwrite`) before resubmitting.
 
+### Training result (2026-07-22)
+
+Job 201730, NCHC `8gpus` node `25a-hgpn142`, both arms in one allocation, 4 GPUs each.
+**State COMPLETED, exit 0:0, elapsed 5h55m, zero errors in either arm.** Checkpoints at
+5000 / 10000 / 15000 / 19999 on both, so every matched-step comparison is available.
+
+| | trunc6 (6 layers) | trunc18 (control) |
+|---|---|---|
+| final loss @ 19900 | **0.0291** | **0.0105** |
+| grad_norm @ 19900 | 0.1117 | 0.0575 |
+| param_norm @ 19900 | 1209.4 | 1834.9 |
+| training rate | 2.5 it/s | 1.0 s/it |
+
+Both converged: small, stable gradient norms, no divergence or collapse.
+
+Matched-step flow loss:
+
+| step | trunc6 | trunc18 | ratio A/B |
+|---|---|---|---|
+| 1000 | 0.04490 | 0.01487 | 3.02x |
+| 5000 | 0.03340 | 0.01111 | 3.01x |
+| 10000 | 0.03147 | 0.01082 | 2.91x |
+| 15000 | 0.02919 | 0.01053 | 2.77x |
+| 19900 | 0.02911 | 0.01046 | 2.78x |
+
+**The gap narrows but does not close** — 3.02x to 2.78x over 20k steps. Arm A was still
+improving at the end (0.0334 at 5k to 0.0291 at 20k), so it is not saturated, but the trend
+is far too slow to reach parity with more steps. Read that as a capacity ceiling rather than
+undertraining.
+
+Incidental corroboration of the latency result: arm A trained at **2.5x** the control's
+step rate (2.5 it/s vs 1.0 s/it), on a forward+backward workload, against the 2.14x
+forward-only speedup measured in Gate 0.
+
+**Flow loss is not task success.** The mapping is nonlinear — the published baselines have
+MEM K=1 at 42% and vanilla at 40% despite quite different training. Section 4 is what
+decides this.
+
 ## 3. Serve
 
 Stock serving; no MEM session server is involved. `RLDSDroidDataConfig` with

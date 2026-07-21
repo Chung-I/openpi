@@ -14,9 +14,9 @@ import sys
 import flax.nnx as nnx
 import flax.traverse_util
 import jax
-import numpy as np
 
 import openpi.models.gemma as _gemma
+import openpi.shared.array_typing as at
 import openpi.training.config as _config
 
 _SCANNED_LAYER_PREFIX = "PaliGemma/llm/layers/"
@@ -60,17 +60,10 @@ def check(config_name: str) -> dict[str, int]:
     assert_uniform_depth(loaded_depths, expected)
     print(f"weights loaded at depth {expected} ({len(loaded_depths)} scanned params) OK")
 
-    # Every scanned param the model wants must have been loaded, at a matching shape.
-    flat_model = flax.traverse_util.flatten_dict(params_shape, sep="/")
-    flat_loaded = flax.traverse_util.flatten_dict(loaded, sep="/")
-    missing = sorted(set(flat_model) - set(flat_loaded))
-    if missing:
-        raise ValueError(f"{len(missing)} params were not loaded, e.g. {missing[:5]}")
-    for k, want in flat_model.items():
-        got = flat_loaded[k]
-        if tuple(want.shape) != tuple(np.shape(got)):
-            raise ValueError(f"shape mismatch for '{k}': model wants {want.shape}, loader gave {np.shape(got)}")
-    print(f"all {len(flat_model)} params match the model's shapes OK")
+    # Same check the trainer runs at load time: catches missing keys, extra keys the loader
+    # returned that the model doesn't want, shape mismatches, and dtype mismatches.
+    at.check_pytree_equality(expected=params_shape, got=loaded, check_shapes=True, check_dtypes=True)
+    print("all params match the model's shapes and dtypes OK")
 
     return loaded_depths
 

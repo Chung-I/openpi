@@ -34,6 +34,23 @@ fi
 export TRITON_CACHE_DIR="$HOME/.triton"
 export XDG_CACHE_HOME="$HOME/.cache"
 export HF_HOME=/work/roboleon1295/hf_cache
+# uv's cache follows HOME, but be explicit: the user's /home quota is the binding limit
+# on this cluster (not filesystem space), and a full quota fails builds mid-run.
+export UV_CACHE_DIR="${UV_CACHE_DIR:-/work/roboleon1295/.uv-cache}"
+
+# TF's GCS client (tf.data streaming the DROID RLDS shards) needs a CA bundle, and these
+# nodes have no /etc/ssl/certs/ca-certificates.crt -- it is a RHEL-family image carrying
+# ca-bundle.crt instead, while libcurl defaults to the Debian path. Without this the run
+# dies ~60s in with "libcurl code 77 ... Problem with the SSL CA cert". Derived from the
+# venv rather than hardcoded so it follows OPENPI_ROOT.
+CA_BUNDLE="$(uv run --no-sync python -c 'import certifi; print(certifi.where())' 2>/dev/null)"
+if [ ! -f "$CA_BUNDLE" ]; then
+  echo "FATAL: could not locate a certifi CA bundle (got '$CA_BUNDLE'); TF GCS reads would fail."
+  exit 1
+fi
+export CURL_CA_BUNDLE="$CA_BUNDLE"
+export SSL_CERT_FILE="$CA_BUNDLE"
+export GCS_CA_BUNDLE="$CA_BUNDLE"
 
 # Slurm opens --output (trunc_%j.log) before this script runs, so it can't be created here --
 # see docs/eval/TRUNCATION.md section 2. These per-arm logs, however, are only ever opened by

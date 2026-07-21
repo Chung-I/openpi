@@ -73,6 +73,13 @@ cp -p ~/.netrc /work/roboleon1295/jobhome/.netrc
 
 The script asserts this file exists and aborts if it does not.
 
+The script also points TF's GCS client at the venv's certifi bundle. These nodes are a
+RHEL-family image carrying `/etc/ssl/certs/ca-bundle.crt`, but libcurl defaults to the
+Debian path `/etc/ssl/certs/ca-certificates.crt`, which does not exist — so `tf.data`
+streaming the DROID RLDS shards dies about 60 s in with `libcurl code 77 ... Problem with
+the SSL CA cert`. The checkpoint download uses a different code path and succeeds, which
+makes this look like a training bug rather than a certificate one.
+
 To run from a git worktree instead of the main checkout — useful when the main checkout has
 unrelated uncommitted work — set `OPENPI_ROOT` and override `--output`, since Slurm opens
 that path before the script body runs and so cannot expand the variable:

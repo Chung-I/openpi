@@ -8,7 +8,10 @@
 #SBATCH --time=48:00:00
 #SBATCH --output=/work/roboleon1295/openpi/logs/trunc_%j.log
 set -x
-cd /work/roboleon1295/openpi
+# Without this guard, a missing/unmounted repo dir would leave the shell in whatever
+# directory it started in and every relative path below (logs/, scripts/...) would run
+# somewhere silently wrong instead of failing loudly.
+cd /work/roboleon1295/openpi || { echo "FATAL: cd /work/roboleon1295/openpi failed"; exit 1; }
 
 # Keep caches off /home: it has a 100G quota and a full quota breaks runs mid-flight.
 export HOME=/work/roboleon1295/jobhome
@@ -16,6 +19,11 @@ mkdir -p "$HOME/.triton" "$HOME/.cache"
 export TRITON_CACHE_DIR="$HOME/.triton"
 export XDG_CACHE_HOME="$HOME/.cache"
 export HF_HOME=/work/roboleon1295/hf_cache
+
+# Slurm opens --output (trunc_%j.log) before this script runs, so it can't be created here --
+# see docs/eval/TRUNCATION.md section 2. These per-arm logs, however, are only ever opened by
+# this script body, so they do need to be created here.
+mkdir -p logs
 
 A6_LOG=logs/trunc6_${SLURM_JOB_ID}.log
 A18_LOG=logs/trunc18_${SLURM_JOB_ID}.log
@@ -34,8 +42,15 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 XLA_PYTHON_CLIENT_MEM_FRACTION=0.8 \
   uv run --no-sync python scripts/train.py pi05_droid_jointpos_trunc18 > "$A18_LOG" 2>&1 &
 P18=$!
 
-wait $P6;  echo "TRUNC6_EXIT=$?"
-wait $P18; echo "TRUNC18_EXIT=$?"
+wait $P6;  TRUNC6_EXIT=$?;  echo "TRUNC6_EXIT=$TRUNC6_EXIT"
+wait $P18; TRUNC18_EXIT=$?; echo "TRUNC18_EXIT=$TRUNC18_EXIT"
 
 echo "=== trunc6 tail ===";  tail -n 40 "$A6_LOG"
 echo "=== trunc18 tail ==="; tail -n 40 "$A18_LOG"
+
+# The script's own exit status must reflect the arms' status: ending on `tail` (which almost
+# always succeeds) would otherwise report COMPLETED to Slurm even if an arm died at step 300.
+if [ "$TRUNC6_EXIT" -ne 0 ] || [ "$TRUNC18_EXIT" -ne 0 ]; then
+  echo "FATAL: at least one arm failed (trunc6=$TRUNC6_EXIT, trunc18=$TRUNC18_EXIT)"
+  exit 1
+fi

@@ -1073,7 +1073,18 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-If `nnx.state(abstract_model, nnx.Param).to_pure_dict()` does not produce the same tree the trainer loads into, mirror `scripts/train.py:122`, which uses `train_state_shape.params.to_pure_dict()`.
+**Two corrections applied during execution, kept here so the plan matches the tree:**
+
+1. The open question about `nnx.state(abstract_model, nnx.Param).to_pure_dict()` is **settled: it is correct.** Verified by reconstructing the real `init_train_state` closure from `scripts/train.py:90-116` (including the bf16 freeze-filter cast and `TrainState` wrapping) and diffing its `params.to_pure_dict()` against the gate's tree for `pi05_droid_jointpos_trunc6` — 71 leaves each, identical key sets and shapes. No fallback to `train.py:122` is needed.
+
+2. The hand-rolled missing-key and shape-comparison block above was **replaced with the trainer's own validation**, so the gate is provably equivalent rather than equivalent-given-today's-loaders. It checks both directions of structural mismatch and dtypes:
+
+```python
+    at.check_pytree_equality(expected=params_shape, got=loaded, check_shapes=True, check_dtypes=True)
+    print("all params match the model's shapes and dtypes OK")
+```
+
+This needs `import openpi.shared.array_typing as at`, and `main()`'s exception handler must cover whatever `check_pytree_equality` raises so a mismatch still exits non-zero with the friendly `CHECK FAILED` message.
 
 - [ ] **Step 4: Run the test to verify it passes**
 

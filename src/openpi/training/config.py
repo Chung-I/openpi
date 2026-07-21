@@ -21,6 +21,7 @@ import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.polaris_config as polaris_config
@@ -556,6 +557,69 @@ class TrainConfig:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
 
+def _truncation_arm(keep_layers: tuple[int, ...]) -> TrainConfig:
+    """One arm of the layer-truncation experiment.
+
+    Arm A keeps 6 of 18 layers; arm B keeps all 18 and is the control that separates the
+    cost of truncation from the effect of finetuning. Everything except `keep_layers` is
+    identical between arms by construction -- that is the point of building both here.
+    """
+    return TrainConfig(
+        name=f"pi05_droid_jointpos_trunc{len(keep_layers)}",
+        exp_name=f"pi05_droid_jointpos_trunc{len(keep_layers)}",
+        project_name="layer-truncation",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=16,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            keep_layers=keep_layers,
+        ),
+        # Train LoRA adapters only. Deliberately NOT Pi0Config.get_freeze_filter(): that
+        # freezes only ".*llm.*", leaving SigLIP trainable, which previously fully trained
+        # SigLIP on DROID and collapsed this exact policy to a timid 0%.
+        freeze_filter=nnx.Not(nnx_utils.PathRegex(".*lora.*")),
+        data=RLDSDroidDataConfig(
+            repo_id="droid",
+            rlds_data_dir="gs://gresearch/robotics",
+            action_space=droid_rlds_dataset.DroidActionSpace.JOINT_POSITION,
+            datasets=(
+                droid_rlds_dataset.RLDSDataset(
+                    name="droid",
+                    version="1.0.1",
+                    weight=1.0,
+                    filter_dict_path="gs://openpi-assets/droid/droid_sample_ranges_v1_0_1.json",
+                ),
+            ),
+            assets=AssetsConfig(
+                # Joint-POSITION norm stats. Velocity stats on position targets distort the
+                # flow loss, which was diagnosed as a cause of a timid policy.
+                assets_dir="gs://openpi-assets-simeval/pi05_droid_jointpos/assets",
+                asset_id="droid",
+            ),
+        ),
+        weight_loader=weight_loaders.LayerSubsetWeightLoader(
+            "gs://openpi-assets-simeval/pi05_droid_jointpos/params",
+            keep_layers=keep_layers,
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        fsdp_devices=4,
+        num_train_steps=20_000,
+        batch_size=128,
+        seed=42,
+        save_interval=2_500,
+        # Retains 5k/10k/15k/20k permanently so both arms can be read at matched steps.
+        keep_period=5_000,
+        num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
+    )
+
+
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
     #
@@ -916,6 +980,11 @@ _CONFIGS = [
         num_train_steps=20_000,
         batch_size=32,
     ),
+    #
+    # Layer-truncation configs. See docs/superpowers/specs/2026-07-21-pi05-layer-truncation-design.md
+    #
+    _truncation_arm((0, 3, 7, 11, 14, 17)),
+    _truncation_arm(tuple(range(18))),
     #
     # ALOHA Sim configs. This config is used to demonstrate how to train on a simple simulated environment.
     #

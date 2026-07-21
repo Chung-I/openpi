@@ -223,6 +223,14 @@ def transform_iterable_dataset(
     )
 
 
+def _num_video_frames_for(model_config) -> int:
+    """Frames to gather for the RLDS video path. Only MEM models use it;
+    non-MEM models must get 0 so the video gather/decode stays off."""
+    if model_config.model_type == _model.ModelType.PI0_MEM:
+        return getattr(model_config, "num_video_frames", 0)
+    return 0
+
+
 def create_data_loader(
     config: _config.TrainConfig,
     *,
@@ -255,7 +263,7 @@ def create_data_loader(
             num_batches=num_batches,
             skip_norm_stats=skip_norm_stats,
             framework=framework,
-            num_video_frames=getattr(config.model, "num_video_frames", 1),
+            num_video_frames=_num_video_frames_for(config.model),
         )
     return create_torch_data_loader(
         data_config,

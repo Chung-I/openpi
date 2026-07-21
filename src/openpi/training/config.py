@@ -10,6 +10,7 @@ from typing import Any, Literal, Protocol, TypeAlias
 
 import etils.epath as epath
 import flax.nnx as nnx
+from openpi.shared import nnx_utils
 from typing_extensions import override
 import tyro
 
@@ -409,7 +410,7 @@ class RLDSDroidDataConfig(DataConfigFactory):
             "actions": "actions",
             "prompt": "prompt",
         }
-        if model_config.model_type == _model.ModelType.PI0_MEM and getattr(model_config, "num_video_frames", 1) > 1:
+        if model_config.model_type == _model.ModelType.PI0_MEM and getattr(model_config, "num_video_frames", 1) >= 1:
             repack_map.update({
                 "observation/video_exterior_image_1_left": "observation/video_image",
                 "observation/video_wrist_image_left": "observation/video_wrist_image",
@@ -660,6 +661,29 @@ _CONFIGS = [
             data_transforms=lambda model: _transforms.Group(
                 inputs=[droid_policy.DroidInputs(model_type=ModelType.PI05)],
                 outputs=[droid_policy.DroidOutputs()],
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+    ),
+    TrainConfig(
+        # Joint-position variant of pi0.5-DROID for simulated eval (e.g. RoboLab).
+        # The original pi05_droid checkpoint outputs joint *velocity* actions, which
+        # openpi documents as incompatible with sim. This config applies AbsoluteActions
+        # to the joint dims (mask 7, -1: joints absolute, gripper untouched) so the model
+        # output is applied as absolute joint-position targets. Serve with the matching
+        # checkpoint: gs://openpi-assets-simeval/pi05_droid_jointpos.
+        name="pi05_droid_jointpos",
+        model=pi0_config.Pi0Config(action_horizon=15, pi05=True),
+        data=SimpleDataConfig(
+            assets=AssetsConfig(asset_id="droid"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[droid_policy.DroidInputs(model_type=ModelType.PI05)],
+                outputs=[
+                    _transforms.AbsoluteActions(_transforms.make_bool_mask(7, -1)),
+                    droid_policy.DroidOutputs(),
+                ],
             ),
             base_config=DataConfig(
                 prompt_from_task=True,
@@ -1007,6 +1031,21 @@ _CONFIGS = [
         wandb_enabled=False,
     ),
     TrainConfig(
+        name="pi0_mem_k1_debug",
+        data=FakeDataConfig(),
+        batch_size=2,
+        model=pi0_mem_config.Pi0MEMConfig(
+            paligemma_variant="dummy",
+            action_expert_variant="dummy",
+            num_video_frames=1,
+        ),
+        save_interval=100,
+        overwrite=True,
+        exp_name="pi0_mem_k1_debug",
+        num_train_steps=10,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
         name="pi0_mem_lora_debug",
         data=FakeDataConfig(),
         batch_size=2,
@@ -1071,6 +1110,132 @@ _CONFIGS = [
         log_interval=100,
         save_interval=5000,
         keep_period=10_000,
+        num_workers=0,
+    ),
+    TrainConfig(
+        # Video-encoder-eval sub-project B: K=6 arm (video encoder ON).
+        name="pi0_mem_droid_k6_verify",
+        exp_name="pi0_mem_droid_k6_verify",
+        project_name="video-encoder-eval",
+        model=pi0_mem_config.Pi0MEMConfig(
+            pi05=True,
+            # Image-only memory: current state as pi0.5 discretized text (no continuous
+            # state token) so K=1 reduces to vanilla pi0.5.
+            discrete_state_input=True,
+            # Flow-video finetune: train the video encoder DIRECTLY via the flow expert.
+            # insulate_flow_prefix=False lets flow gradients reach the prefix (video encoder
+            # + backbone) via a single joint forward (like vanilla pi0). FAST/HL off. The
+            # flow-only base has a good flow head (untrained K=1 == vanilla ~94%), so flow
+            # finetuning refines it while the video encoder learns temporal features.
+            fast_loss_weight=0.0,
+            ll_loss_weight=1.0,
+            hl_loss_weight=0.0,
+            insulate_flow_prefix=False,
+            action_dim=32,
+            action_horizon=16,
+            num_video_frames=6,
+            lora=True,
+        ),
+        # Train ONLY the video encoder (video_img) + LoRA adapters (backbone + expert) via
+        # the flow expert. Frozen: single-frame SigLIP `img` (unused — DROID data always has
+        # video), LLM/expert base weights, and state_proj (dead: discrete_state_input=True +
+        # image-only memory means the continuous state token is never emitted).
+        freeze_filter=nnx.Not(nnx_utils.PathRegex(".*(video_img|lora).*")),
+        data=RLDSDroidDataConfig(
+            repo_id="droid",
+            rlds_data_dir="gs://gresearch/robotics",
+            action_space=droid_rlds_dataset.DroidActionSpace.JOINT_POSITION,
+            datasets=(
+                droid_rlds_dataset.RLDSDataset(
+                    name="droid",
+                    version="1.0.1",
+                    weight=1.0,
+                    filter_dict_path="gs://openpi-assets/droid/droid_sample_ranges_v1_0_1.json",
+                ),
+            ),
+            assets=AssetsConfig(
+                # Recompute JOINT_POSITION norm-stats locally (compute_norm_stats.py
+                # writes to assets_dirs/droid); do NOT reuse the velocity base's stats.
+                asset_id="droid",
+            ),
+        ),
+        weight_loader=weight_loaders.SiglipToVideoImgWeightLoader(
+            # Joint-position base (the checkpoint that gives 94% zero-shot on RoboLab),
+            # not the velocity pi05_droid base.
+            "gs://openpi-assets-simeval/pi05_droid_jointpos/params",
+        ),
+        # Hyperparameters matched to pi05_droid_finetune: 20k steps, batch 32,
+        # default CosineDecaySchedule / AdamW / ema_decay=0.99.
+        fsdp_devices=1,
+        num_train_steps=20_000,
+        batch_size=32,
+        grad_accum_steps=1,
+        seed=42,
+        save_interval=1_000,
+        keep_period=5_000,
+        num_workers=0,
+    ),
+    TrainConfig(
+        # Video-encoder-eval sub-project B: K=1 arm (video encoder OFF, A-validated baseline).
+        name="pi0_mem_droid_k1_verify",
+        exp_name="pi0_mem_droid_k1_verify",
+        project_name="video-encoder-eval",
+        model=pi0_mem_config.Pi0MEMConfig(
+            pi05=True,
+            # Image-only memory: current state as pi0.5 discretized text (no continuous
+            # state token) so K=1 reduces to vanilla pi0.5.
+            discrete_state_input=True,
+            # Flow-video finetune: train the video encoder DIRECTLY via the flow expert.
+            # insulate_flow_prefix=False lets flow gradients reach the prefix (video encoder
+            # + backbone) via a single joint forward (like vanilla pi0). FAST/HL off. The
+            # flow-only base has a good flow head (untrained K=1 == vanilla ~94%), so flow
+            # finetuning refines it while the video encoder learns temporal features.
+            fast_loss_weight=0.0,
+            ll_loss_weight=1.0,
+            hl_loss_weight=0.0,
+            insulate_flow_prefix=False,
+            action_dim=32,
+            action_horizon=16,
+            num_video_frames=1,
+            lora=True,
+        ),
+        # Train ONLY the video encoder (video_img) + LoRA adapters (backbone + expert) via
+        # the flow expert. Frozen: single-frame SigLIP `img` (unused — DROID data always has
+        # video), LLM/expert base weights, and state_proj (dead: discrete_state_input=True +
+        # image-only memory means the continuous state token is never emitted).
+        freeze_filter=nnx.Not(nnx_utils.PathRegex(".*(video_img|lora).*")),
+        data=RLDSDroidDataConfig(
+            repo_id="droid",
+            rlds_data_dir="gs://gresearch/robotics",
+            action_space=droid_rlds_dataset.DroidActionSpace.JOINT_POSITION,
+            datasets=(
+                droid_rlds_dataset.RLDSDataset(
+                    name="droid",
+                    version="1.0.1",
+                    weight=1.0,
+                    filter_dict_path="gs://openpi-assets/droid/droid_sample_ranges_v1_0_1.json",
+                ),
+            ),
+            assets=AssetsConfig(
+                # Recompute JOINT_POSITION norm-stats locally (compute_norm_stats.py
+                # writes to assets_dirs/droid); do NOT reuse the velocity base's stats.
+                asset_id="droid",
+            ),
+        ),
+        weight_loader=weight_loaders.SiglipToVideoImgWeightLoader(
+            # Joint-position base (the checkpoint that gives 94% zero-shot on RoboLab),
+            # not the velocity pi05_droid base.
+            "gs://openpi-assets-simeval/pi05_droid_jointpos/params",
+        ),
+        # Hyperparameters matched to pi05_droid_finetune: 20k steps, batch 32,
+        # default CosineDecaySchedule / AdamW / ema_decay=0.99.
+        fsdp_devices=1,
+        num_train_steps=20_000,
+        batch_size=32,
+        grad_accum_steps=1,
+        seed=42,
+        save_interval=1_000,
+        keep_period=5_000,
         num_workers=0,
     ),
     TrainConfig(

@@ -65,6 +65,10 @@ class Pi0MEM(_model.BaseModel):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.config = config
         self.pi05 = config.pi05
+        # When True, the current state is fed as pi0.5 discretized text in the prompt
+        # (not as a continuous state_proj suffix token). Image-only memory: makes K=1
+        # reduce to vanilla pi0.5.
+        self.discrete_state_input = config.discrete_state_input
 
         pg_variant = config.paligemma_variant
         ax_variant = config.action_expert_variant
@@ -217,14 +221,18 @@ class Pi0MEM(_model.BaseModel):
         tokens = []
 
         # --- K proprioceptive state tokens (one per video frame) ---
-        if obs.video_states is not None:
-            state_tokens = self.state_proj(obs.video_states)  # [b, K, d_expert]
-        else:
-            state_tokens = self.state_proj(obs.state)[:, None, :]  # [b, 1, d_expert]
-        tokens.append(state_tokens)
-        input_mask.append(jnp.ones(state_tokens.shape[:2], dtype=jnp.bool_))
-        # First state token is the AR boundary; remaining share the same block.
-        ar_mask += [True] + [False] * (state_tokens.shape[1] - 1)
+        # Skipped when discrete_state_input=True: pi0.5 feeds the current state as
+        # discretized text in the prompt, so the suffix carries no continuous state
+        # token (the action tokens below provide the prefix->suffix AR boundary).
+        if not self.discrete_state_input:
+            if obs.video_states is not None:
+                state_tokens = self.state_proj(obs.video_states)  # [b, K, d_expert]
+            else:
+                state_tokens = self.state_proj(obs.state)[:, None, :]  # [b, 1, d_expert]
+            tokens.append(state_tokens)
+            input_mask.append(jnp.ones(state_tokens.shape[:2], dtype=jnp.bool_))
+            # First state token is the AR boundary; remaining share the same block.
+            ar_mask += [True] + [False] * (state_tokens.shape[1] - 1)
 
         # --- Action tokens with flow-matching timestep ---
         action_tokens = self.action_in_proj(noisy_actions)  # [b, H, d_expert]
@@ -478,25 +486,41 @@ class Pi0MEM(_model.BaseModel):
         # Encode the LL prefix once (video encoded here, with gradient for the FAST pass).
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix_ll(observation_ll)
 
-        # --- Flow pass (insulated): flow expert attends to a stop-grad'd prefix KV. ---
-        sg_prefix = jax.lax.stop_gradient(prefix_tokens)
-        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
-        prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache = self.PaliGemma.llm([sg_prefix, None], mask=prefix_attn_mask, positions=prefix_positions)
-        kv_cache = jax.tree.map(jax.lax.stop_gradient, kv_cache)
-
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix_ll(observation_ll, x_t, time)
-        suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
-        prefix_attn_for_suffix = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
-        full_attn_mask = jnp.concatenate([prefix_attn_for_suffix, suffix_attn_mask], axis=-1)
-        positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
-        (_, suffix_out), _ = self.PaliGemma.llm(
-            [None, suffix_tokens],
-            mask=full_attn_mask,
-            positions=positions,
-            kv_cache=kv_cache,
-            adarms_cond=[None, adarms_cond],
-        )
+
+        if self.config.insulate_flow_prefix:
+            # --- Knowledge-Insulation: flow expert attends to a stop-grad'd prefix KV, so
+            # flow gradients do NOT reach the backbone/video encoder (those train via FAST). ---
+            sg_prefix = jax.lax.stop_gradient(prefix_tokens)
+            prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+            prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
+            _, kv_cache = self.PaliGemma.llm([sg_prefix, None], mask=prefix_attn_mask, positions=prefix_positions)
+            kv_cache = jax.tree.map(jax.lax.stop_gradient, kv_cache)
+            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+            prefix_attn_for_suffix = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
+            full_attn_mask = jnp.concatenate([prefix_attn_for_suffix, suffix_attn_mask], axis=-1)
+            positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+            (_, suffix_out), _ = self.PaliGemma.llm(
+                [None, suffix_tokens],
+                mask=full_attn_mask,
+                positions=positions,
+                kv_cache=kv_cache,
+                adarms_cond=[None, adarms_cond],
+            )
+        else:
+            # --- Un-insulated: single joint forward over [prefix, suffix] (like vanilla pi0),
+            # so flow gradients flow through full attention into the prefix -> the video
+            # encoder + backbone are trained directly by the flow expert. ---
+            input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
+            ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
+            attn_mask = make_attn_mask(input_mask, ar_mask)
+            positions = jnp.cumsum(input_mask, axis=1) - 1
+            (_, suffix_out), _ = self.PaliGemma.llm(
+                [prefix_tokens, suffix_tokens],
+                mask=attn_mask,
+                positions=positions,
+                adarms_cond=[None, adarms_cond],
+            )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
         ll_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)  # [b, ah]
 

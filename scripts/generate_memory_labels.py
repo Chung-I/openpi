@@ -43,6 +43,8 @@ def main():
     parser.add_argument("--base_url", type=str, default=None)
     parser.add_argument("--max_concurrency", type=int, default=64)
     parser.add_argument("--out_dir", type=str, default=None, help="per-episode shard dir (resume)")
+    parser.add_argument("--generation_mode", type=str, default="stateless", choices=["stateless", "recursive"])
+    parser.add_argument("--disable_thinking", action="store_true")
     args = parser.parse_args()
 
     config = MemoryLabelConfig(
@@ -51,6 +53,8 @@ def main():
         max_memory_tokens=args.max_memory_tokens,
         base_url=args.base_url,
         max_concurrency=args.max_concurrency,
+        generation_mode=args.generation_mode,
+        disable_thinking=args.disable_thinking,
     )
 
     with open(args.episodes_file) as f:

@@ -40,12 +40,19 @@ class Pi0MEMConfig(_model.BaseModelConfig):
     ll_loss_weight: float = 1.0
     fast_loss_weight: float = 1.0
     lora: bool = False
+    # Knowledge-Insulation: when True (default), the flow expert attends to a stop-gradient
+    # copy of the prefix, so the flow loss does NOT train the backbone/video encoder (those
+    # learn via the FAST loss). Set False to let flow gradients reach the prefix (video
+    # encoder + backbone), i.e. train the video encoder directly via the flow expert
+    # (like vanilla pi0 flow finetuning); use with fast_loss_weight=0.
+    insulate_flow_prefix: bool = True
 
     def __post_init__(self):
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
-        if self.discrete_state_input:
-            raise ValueError("MEM requires continuous state input (discrete_state_input must be False)")
+        # discrete_state_input=True selects pi0.5's text-state design (image-only memory):
+        # the current state is discretized into the prompt and the suffix state token is
+        # skipped (see Pi0MEM.embed_suffix_ll). False keeps the continuous state_proj path.
 
     @property
     def video_vit_config(self) -> VideoViTConfig:

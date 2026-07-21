@@ -213,7 +213,9 @@ class DeltaActions(DataTransformFn):
         if "actions" not in data or self.mask is None:
             return data
 
-        state, actions = data["state"], data["actions"]
+        # np.array copies: the RLDS/tf.data pipeline yields read-only arrays, and the
+        # in-place subtraction below would raise "output array is read-only" on them.
+        state, actions = data["state"], np.array(data["actions"])
         mask = np.asarray(self.mask)
         dims = mask.shape[-1]
         actions[..., :dims] -= np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)

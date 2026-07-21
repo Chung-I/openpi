@@ -113,11 +113,20 @@ def _download_gsutil(url: str, local_path: pathlib.Path, **kwargs) -> None:
         )
         _download_fsspec(url, local_path, **kwargs)
         return
-    local_path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["gsutil", "-m", "cp", "-r", f"{url}/*", str(local_path)],
-        check=True,
-    )
+    try:
+        local_path.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["gsutil", "-m", "cp", "-r", f"{url}/*", str(local_path)],
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # The `/*` suffix treats the URL as a directory, so a single object (e.g. the DROID
+        # filter dict `.../droid_sample_ranges_v1_0_1.json`) matches nothing and gsutil exits
+        # non-zero. Fall back to gcsfs, which handles both files and directories.
+        logger.warning("gsutil failed, falling back to gcsfs.")
+        if local_path.is_dir():
+            shutil.rmtree(local_path)
+        _download_fsspec(url, local_path, **kwargs)
 
 
 def _download_fsspec(url: str, local_path: pathlib.Path, **kwargs) -> None:

@@ -26,7 +26,14 @@ def _fake_checkpoint_params(depth: int = 18):
                 "final_norm": {"scale": np.ones(4, dtype=np.float32)},
                 "embedder": {"input_embedding": np.ones((5, 4), dtype=np.float32)},
             },
-            "img": {"head": {"kernel": np.ones((2, 2), dtype=np.float32)}},
+            "img": {
+                "head": {"kernel": np.ones((2, 2), dtype=np.float32)},
+                # NOT scanned (outside `PaliGemma/llm/layers/`), but its leading dim coincidentally
+                # equals `depth`. A shape-based gather heuristic would wrongly slice this; the
+                # gather must select by key prefix only. See
+                # test_gather_leaves_unscanned_params_untouched.
+                "embedding": np.arange(depth * 4, dtype=np.float32).reshape(depth, 4),
+            },
         },
         "action_out_proj": {"kernel": np.ones((3, 3), dtype=np.float32)},
     }
@@ -57,6 +64,9 @@ def test_gather_leaves_unscanned_params_untouched():
         ("PaliGemma", "llm", "final_norm", "scale"),
         ("PaliGemma", "llm", "embedder", "input_embedding"),
         ("PaliGemma", "img", "head", "kernel"),
+        # Leading dim == depth (18), but it lives outside `PaliGemma/llm/layers/`. A gather
+        # that keyed off shape instead of key prefix would wrongly slice this.
+        ("PaliGemma", "img", "embedding"),
         ("action_out_proj", "kernel"),
     ]:
         expected = params
@@ -92,6 +102,30 @@ def test_gather_rejects_an_index_beyond_the_checkpoint_depth():
     params = _fake_checkpoint_params(depth=18)
     with pytest.raises(ValueError, match="out of range"):
         weight_loaders._gather_scanned_layers(params, (0, 18))  # noqa: SLF001
+
+
+def test_gather_rejects_an_empty_keep_layers():
+    params = _fake_checkpoint_params(depth=18)
+    with pytest.raises(ValueError, match="non-empty"):
+        weight_loaders._gather_scanned_layers(params, ())  # noqa: SLF001
+
+
+def test_gather_rejects_a_negative_index_instead_of_silently_wrapping():
+    """(-1, 3) would otherwise silently wrap to [layer 17, layer 3] via numpy's negative indexing."""
+    params = _fake_checkpoint_params(depth=18)
+    with pytest.raises(ValueError, match="out of range"):
+        weight_loaders._gather_scanned_layers(params, (-1, 3))  # noqa: SLF001
+
+
+def test_gather_rejects_an_out_of_range_index_even_alongside_valid_ones():
+    """(5, 2, 2): index 5 is out of range for depth 4 and must be caught, even though 2 (repeated) is valid.
+
+    A max-only check on this exact tuple would also catch it (max=5), but per-index checking
+    is what correctly localizes the complaint to the offending index rather than the tuple.
+    """
+    params = _fake_checkpoint_params(depth=4)
+    with pytest.raises(ValueError, match="out of range"):
+        weight_loaders._gather_scanned_layers(params, (5, 2, 2))  # noqa: SLF001
 
 
 def test_layer_subset_loader_is_a_weight_loader():

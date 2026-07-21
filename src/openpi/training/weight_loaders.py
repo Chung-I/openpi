@@ -66,16 +66,21 @@ def _gather_scanned_layers(loaded_params: at.Params, keep_layers: tuple[int, ...
     Both the PaliGemma backbone and the action expert live in one scan, so this single
     gather truncates both towers. Non-scanned parameters pass through unchanged.
     """
+    if not keep_layers:
+        raise ValueError(f"keep_layers must be non-empty, got {keep_layers!r}.")
+
     flat = flax.traverse_util.flatten_dict(loaded_params, sep="/")
     index = list(keep_layers)
     result = {}
     for k, v in flat.items():
         if k.startswith(_SCANNED_LAYER_PREFIX):
             depth = v.shape[0]
-            if max(index) >= depth:
-                raise ValueError(
-                    f"keep_layers index {max(index)} is out of range for '{k}', whose scan axis has depth {depth}."
-                )
+            for i in index:
+                if not (0 <= i < depth):
+                    raise ValueError(
+                        f"keep_layers index {i} is out of range for '{k}', whose scan axis has depth {depth} "
+                        f"(valid indices are 0..{depth - 1}). Full keep_layers={tuple(keep_layers)}."
+                    )
             result[k] = v[index]
         else:
             result[k] = v

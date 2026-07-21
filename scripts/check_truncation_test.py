@@ -38,3 +38,24 @@ def test_assert_uniform_depth_rejects_a_wrong_depth():
 def test_assert_uniform_depth_rejects_an_empty_stack():
     with pytest.raises(ValueError, match="no scanned"):
         check_truncation.assert_uniform_depth({}, expected=6)
+
+
+def test_assert_layers_agree_accepts_matching_indices():
+    check_truncation.assert_layers_agree((0, 3, 7, 11, 14, 17), (0, 3, 7, 11, 14, 17))
+
+
+def test_assert_layers_agree_accepts_no_loader_opinion():
+    """A loader without a `keep_layers` attribute (e.g. CheckpointWeightLoader) is exempt."""
+    check_truncation.assert_layers_agree((0, 3, 7, 11, 14, 17), None)
+    check_truncation.assert_layers_agree(None, None)
+
+
+def test_assert_layers_agree_rejects_same_length_different_indices():
+    """The failure this fix exists for: a depth-only check would miss this."""
+    with pytest.raises(ValueError, match=r"weight loader keeps layers \(1, 3\)"):
+        check_truncation.assert_layers_agree((0, 2), (1, 3))
+
+
+def test_assert_layers_agree_rejects_loader_layers_when_model_is_untruncated():
+    with pytest.raises(ValueError, match="model was built for \\(\\)"):
+        check_truncation.assert_layers_agree(None, (0, 1))

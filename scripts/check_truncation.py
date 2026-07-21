@@ -38,6 +38,25 @@ def assert_uniform_depth(depths: dict[str, int], expected: int) -> None:
         raise ValueError(f"expected {expected} layers, but {len(wrong)} params disagree: {sample}")
 
 
+def assert_layers_agree(model_layers: tuple[int, ...] | None, loader_layers: tuple[int, ...] | None) -> None:
+    """The weight loader must gather the same indices the model was built to hold.
+
+    Both fields independently satisfy "the right number of layers" -- e.g. model
+    keep_layers=(0, 2) and loader keep_layers=(1, 3) both produce depth 2 -- so a depth-only
+    check (`assert_uniform_depth`) cannot catch a mismatched index list. This catches it
+    before the (expensive) weight load.
+    """
+    if loader_layers is None:
+        # Loaders without a keep_layers attribute (e.g. CheckpointWeightLoader) aren't
+        # truncation-aware and have nothing to agree or disagree with.
+        return
+    if tuple(loader_layers) != tuple(model_layers or ()):
+        raise ValueError(
+            f"weight loader keeps layers {tuple(loader_layers)} but the model was built for "
+            f"{tuple(model_layers or ())} -- training would silently use the wrong blocks."
+        )
+
+
 def check(config_name: str) -> dict[str, int]:
     train_config = _config.get_config(config_name)
     model_config = train_config.model
@@ -46,6 +65,9 @@ def check(config_name: str) -> dict[str, int]:
         expected = _gemma.get_config(model_config.paligemma_variant).depth
     else:
         expected = len(model_config.keep_layers)
+
+    loader_layers = getattr(train_config.weight_loader, "keep_layers", None)
+    assert_layers_agree(model_config.keep_layers, loader_layers)
 
     # Abstract build: shapes only, no device memory for the 3B model.
     abstract_model = nnx.eval_shape(model_config.create, jax.random.key(0))

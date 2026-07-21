@@ -54,6 +54,57 @@ class CheckpointWeightLoader(WeightLoader):
         return _merge_params(loaded_params, params, missing_regex=".*lora.*")
 
 
+# Every parameter under this prefix is produced by the shared nn.scan over transformer
+# blocks and carries a leading depth axis. Verified against a real checkpoint: the
+# embedder, final norms, SigLIP and the action projections sit outside it.
+_SCANNED_LAYER_PREFIX = "PaliGemma/llm/layers/"
+
+
+def _gather_scanned_layers(loaded_params: at.Params, keep_layers: tuple[int, ...]) -> at.Params:
+    """Slices the transformer stack's scan axis down to `keep_layers`.
+
+    Both the PaliGemma backbone and the action expert live in one scan, so this single
+    gather truncates both towers. Non-scanned parameters pass through unchanged.
+    """
+    flat = flax.traverse_util.flatten_dict(loaded_params, sep="/")
+    index = list(keep_layers)
+    result = {}
+    for k, v in flat.items():
+        if k.startswith(_SCANNED_LAYER_PREFIX):
+            depth = v.shape[0]
+            if max(index) >= depth:
+                raise ValueError(
+                    f"keep_layers index {max(index)} is out of range for '{k}', whose scan axis has depth {depth}."
+                )
+            result[k] = v[index]
+        else:
+            result[k] = v
+    return flax.traverse_util.unflatten_dict(result, sep="/")
+
+
+@dataclasses.dataclass(frozen=True)
+class LayerSubsetWeightLoader(WeightLoader):
+    """Loads a checkpoint keeping only a subset of its transformer layers.
+
+    `keep_layers` must match the `Pi0Config.keep_layers` of the model being loaded into —
+    the model is built at `depth=len(keep_layers)`, and the gathered params must match
+    those shapes.
+
+    Example:
+        LayerSubsetWeightLoader("gs://.../params", keep_layers=(0, 3, 7, 11, 14, 17))
+    """
+
+    params_path: str
+    keep_layers: tuple[int, ...]
+
+    def load(self, params: at.Params) -> at.Params:
+        loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
+        loaded_params = _gather_scanned_layers(loaded_params, self.keep_layers)
+        # Add all missing LoRA weights. These come from the freshly built model, so they
+        # already carry the truncated depth.
+        return _merge_params(loaded_params, params, missing_regex=".*lora.*")
+
+
 @dataclasses.dataclass(frozen=True)
 class PaliGemmaWeightLoader(WeightLoader):
     """Loads weights from the official PaliGemma checkpoint.

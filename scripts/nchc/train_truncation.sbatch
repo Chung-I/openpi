@@ -8,10 +8,18 @@
 #SBATCH --time=48:00:00
 #SBATCH --output=/work/roboleon1295/openpi/logs/trunc_%j.log
 set -x
+# Repo root is overridable so this can run from a git worktree without editing the script
+# on the cluster. Slurm exports the submitting environment by default, so:
+#   OPENPI_ROOT=/work/roboleon1295/openpi-trunc \
+#     sbatch --output=/work/roboleon1295/openpi-trunc/logs/trunc_%j.log \
+#       scripts/nchc/train_truncation.sbatch
+# --output must be overridden on the command line too: Slurm opens that path before this
+# script runs, so a #SBATCH directive cannot reference OPENPI_ROOT.
+OPENPI_ROOT="${OPENPI_ROOT:-/work/roboleon1295/openpi}"
 # Without this guard, a missing/unmounted repo dir would leave the shell in whatever
 # directory it started in and every relative path below (logs/, scripts/...) would run
 # somewhere silently wrong instead of failing loudly.
-cd /work/roboleon1295/openpi || { echo "FATAL: cd /work/roboleon1295/openpi failed"; exit 1; }
+cd "$OPENPI_ROOT" || { echo "FATAL: cd $OPENPI_ROOT failed"; exit 1; }
 
 # Keep caches off /home: it has a 100G quota and a full quota breaks runs mid-flight.
 export HOME=/work/roboleon1295/jobhome

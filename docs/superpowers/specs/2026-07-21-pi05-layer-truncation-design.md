@@ -297,9 +297,29 @@ single scheduling slot rather than two.
 
 ## Deferred, informed by the latency profile
 
-The profile surfaced one orthogonal lever worth recording but explicitly not
-pursued here: the denoise loop is flat in action-chunk length out to ~50 tokens,
-so predicting a longer chunk per inference is nearly free (7.1 -> 1.5 ms per
-action across the measured range). At `action_horizon=16` we sit well inside
-that flat region. This is a throughput lever independent of depth, bounded by
-how long the policy stays accurate open-loop, and belongs in its own experiment.
+Two orthogonal levers surfaced and are deliberately not pursued here. Keeping
+them out preserves this experiment's single variable.
+
+**The dead third image slot — ~6.9 ms, ~10%, no retraining.** DROID has three
+cameras, but only two ever reach the model, in *both* code paths: training
+samples one of the two exteriors per trajectory
+(`droid_rlds_dataset.py:129-136`), and inference pins one via an operator CLI
+flag, with upstream asserting it and commenting "we only use one external camera
+for the policy" (`examples/droid/main.py:74-77`). The third slot is therefore
+zero-filled and masked on every DROID sample ever served, yet still costs a full
+SigLIP encode of 256 zero-pixel tokens.
+
+Open question before acting on it: whether dropping those 256 masked tokens is
+an exact no-op on outputs, or whether it shifts the position indices of the
+prompt tokens that follow. If the former, it is provable offline by a numerical
+equivalence test with zero GPU-hours. Settle that first; the answer determines
+whether this is free or needs its own finetune.
+
+**Longer action chunks.** The denoise loop is flat in chunk length out to ~50
+tokens, so predicting more actions per inference is nearly free (7.1 -> 1.5 ms
+per action across the measured range). At `action_horizon=16` we sit well inside
+that flat region. A throughput lever independent of depth, bounded by how long
+the policy stays accurate open-loop.
+
+Stacking all three would ceiling around 2.2x plus the chunk-length throughput
+gain, but each is independently testable and they should stay that way.

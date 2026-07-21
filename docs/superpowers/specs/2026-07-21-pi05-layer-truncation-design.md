@@ -172,13 +172,51 @@ with margin.
 Note for cross-reading eval logs: RoboLab's 4-env arena reports `infer_ms` at
 roughly 4x these single-observation numbers, at the same ratio.
 
-### Gate 1 — coherence check on the untrained slice
+### Gate 1 — what shipped, and why the loss-based check was cut
 
-Compute the pi0.5 flow loss on one real DROID batch for depth-18 versus the
-untrained depth-6 model. Seconds to run, and it catches a wrong gather axis or a
-misordered index list before a 20k-step run. The untrained slice is expected to
-be much worse than depth-18; the check is that the number is finite, stable, and
-in a sane range, not that it is good.
+This section originally specced Gate 1 as computing the pi0.5 flow loss on one
+real DROID batch for depth-18 versus the untrained depth-6 model: seconds to
+run, catching a wrong gather axis or a misordered index list before a 20k-step
+run. That is not what shipped. This is a record of the scope cut, not a
+justification after the fact.
+
+**What shipped instead:** `scripts/check_truncation.py`, run as a pre-launch
+gate in `scripts/nchc/train_truncation.sbatch` before either training arm
+starts. It is a shape/depth check, not a numerical one: it builds the model at
+abstract shapes (`nnx.eval_shape`, no device memory), runs the configured
+weight loader against those shapes, and asserts every scanned parameter comes
+back at the expected depth. Layered on top of that (added in a later review
+pass), it asserts the weight loader's `keep_layers` equals the model's
+`keep_layers` index-for-index, not just in count -- see `assert_layers_agree`
+in the same file.
+
+**What this catches and what it does not.** A wrong gather axis shows up as a
+shape mismatch, which the depth/shape check catches directly. A misordered
+index list -- e.g. loader `(1, 3)` against model `(0, 2)`, or `(3, 0)` against
+`(0, 3)` -- does *not* show up as a shape problem, since both produce a
+depth-2 stack; the shape check alone would pass it silently. That gap is closed
+by two other things, neither of which is a real-batch loss number: the
+index-agreement assertion above (catches the loader/model list disagreeing at
+all), and `_gather_scanned_layers`'s own unit test suite in
+`weight_loaders_test.py`, in particular `test_gather_preserves_the_requested_order`
+and `test_gather_over_the_full_range_is_the_identity`, which pin the gather to
+select by index order and by key prefix rather than by shape. Between the two,
+a wrong-axis bug and a misordered-index bug are both caught before training,
+at effectively zero cost.
+
+**Why the loss-based check was dropped, not just deferred.** A real-batch flow
+loss needs a real DROID batch, which means the RLDS pipeline and GCS access
+running *inside* the pre-launch gate -- the same dependency chain the gate
+exists to run ahead of, before Slurm and the checkpoint download. That is a
+meaningfully heavier gate for a failure mode (misordered indices) the
+index-agreement assertion and the gather's own unit tests already cover. The
+loss number would add confidence about the model producing *sane* outputs at
+the truncated depth, distinct from the axis/ordering question -- but the first
+100 training steps of both arms, watched in wandb (see `docs/eval/TRUNCATION.md`
+section 2), carry that same signal at effectively no added engineering cost:
+an untrained or wrongly-truncated depth-6 model would start pathologically and
+either fail to descend or diverge, which is visible within minutes of a 20k-step
+run rather than requiring its own standalone gate.
 
 ### Training
 

@@ -26,10 +26,31 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.8 uv run python scripts/bench_inference.py \
 Predicted at 10 denoise steps and 968 prefix tokens: 66.0 ms -> 33.1 ms, 1.996x.
 Runs on a single RTX 5090 — inference of a 3B bf16 model needs ~6 GB.
 
-| config | predicted p50 | measured p50 |
-|---|---|---|
-| `pi05_droid_jointpos_trunc18` | 66.0 ms | _fill in_ |
-| `pi05_droid_jointpos_trunc6` | 33.1 ms | _fill in_ |
+**Result (2026-07-21, RTX 5090, 12 repeats after 3 warmup, random weights): PASSED.**
+
+| config | predicted p50 | measured p50 | p95 | SigLIP-only p50 |
+|---|---|---|---|---|
+| `pi05_droid_jointpos_trunc18` | 66.0 ms | **68.6 ms** (+3.9%) | 71.1 ms | 17.0 ms |
+| `pi05_droid_jointpos_trunc6` | 33.1 ms | **32.0 ms** (-3.3%) | 32.6 ms | 16.1 ms |
+
+**Measured speedup 2.14x**, against a 1.996x prediction and a 1.5x abort threshold. The
+LIBERO-fitted cost model transferred to DROID within 4% on both arms, so the 968-token
+prefix argument holds.
+
+Two independent confirmations that the truncation is real rather than masked:
+
+- **The SigLIP floor landed where predicted.** 16.1-17.0 ms measured against 16.21 ms
+  predicted, and it is 50.3% of the 6-layer arm's total against 49% predicted. The
+  spread between the two runs is cross-process measurement noise, not a real difference —
+  neither arm changes the vision encoder.
+- **The truncatable remainder scaled by the depth ratio.** Subtracting SigLIP leaves
+  51.6 ms at 18 layers and 15.9 ms at 6, a ratio of **3.25x** against a depth ratio of
+  exactly 3.00x. Had the layers been masked rather than removed, or had the gather
+  silently kept more blocks than requested, this would not hold.
+
+The 2.14x slightly beats the 2.0x prediction because the per-layer cost on this DROID
+config is marginally higher than the LIBERO fit, so removing 12 of 18 layers recovers a
+little more than the model expected.
 
 ## 2. Train
 

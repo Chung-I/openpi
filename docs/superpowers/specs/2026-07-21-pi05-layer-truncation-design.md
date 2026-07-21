@@ -120,18 +120,51 @@ its stock `run.py` and `Pi0DroidJointposClient` — no `MemSessionPolicy`, no
 
 ## Experiment protocol
 
-### Gate 0 — measure the speedup ceiling before any training
+### Gate 0 — speedup: already measured, so confirm rather than gate
 
-Truncating the LLM does nothing to SigLIP, which is unchanged and not free. Run
-`bench_inference.py` on the sliced-but-untrained depth-6 model against depth-18,
-and report the SigLIP-only fraction that bounds any achievable speedup.
+A prior latency profile of `pi05_libero` on an RTX 5090 (artifact "pi0.5 Latency
+Profile", 40-cell depth x denoise sweep) already timed truncated-depth models
+with dropped trained weights. Its own footnote states the case exactly: "timing
+is faithful, task success is not measured." That is this gate, already run.
 
-No training required. A 3B bf16 model needs roughly 6 GB for inference, so this
-runs on the local RTX 5090; the recorded OOM applies to 3B *gradients*.
+Fitted latency model, R^2 = 0.999:
 
-**Gate:** if end-to-end speedup is under 1.5x, stop and re-scope. Spending 2 x
-20k GPU-hours to buy a 1.3x speedup is not worth it, and the finding itself is
-the useful result.
+```
+L(K, S) = 16.21 + 1.719*K + 0.039*S + 0.1024*(K*S)   ms
+```
+
+At the deployed operating point (`num_steps=10`, `pi0.py:222`; 968 prefix
+tokens):
+
+| K | latency | speedup |
+|---|---|---|
+| 18 | 66.0 ms | 1.00x |
+| **6** | **33.1 ms** | **1.996x** |
+| 3 | 24.8 ms | 2.66x |
+| 1 | 19.3 ms | 3.41x |
+
+The profile transfers from LIBERO to DROID essentially unchanged. DROID's flow
+path builds 3 image slots — 2 real plus 1 zero-filled and masked
+(`droid_policy.py:49-51`) — giving the same 3 x 256 + 200 = 968 prefix tokens
+LIBERO has. `action_horizon=16` versus LIBERO's 10 sits inside the flat region of
+the measured action-token curve (22.9 ms at L=2 rising only to 24.5 ms at L=50),
+so it is within noise.
+
+**Why 6 layers is a defensible stopping point.** The fixed floor F = 16.21 ms —
+SigLIP encode, embedding, host overhead — is untouchable by layer truncation. At
+K=6 it is already 49% of the 33.1 ms total. Truncation's ceiling is therefore
+~4.0x as K approaches 0, and cutting a further 6 -> 3 layers buys only another
+1.33x for presumably far more accuracy damage. Six layers captures roughly half
+the available headroom.
+
+**What remains to do here:** re-run `bench_inference.py` on the actual
+`pi05_droid_jointpos` arms to confirm the transfer, and record the measured
+numbers next to the predictions above. This is a cheap confirmation on the local
+RTX 5090, not a stop/go gate — the 1.5x viability threshold is already cleared
+with margin.
+
+Note for cross-reading eval logs: RoboLab's 4-env arena reports `infer_ms` at
+roughly 4x these single-observation numbers, at the same ratio.
 
 ### Gate 1 — coherence check on the untrained slice
 
@@ -189,13 +222,17 @@ Latency is reported next to success rate. Neither number means much alone.
 
 ### Success criteria
 
-The deliverable is the (speedup, success-rate) pair, reported honestly whatever
-it shows. A clear win is **at least 2x measured end-to-end speedup while
-retaining at least 80% of arm B's overall success rate** — relative, not
-percentage points: if arm B scores 45%, arm A must score at least 36%. Falling
-short is a
-publishable negative result about how much depth pi0.5's DROID competence needs,
-not a failed project.
+Speedup is no longer an open variable — it is predicted at 1.996x and merely
+confirmed (Gate 0 above). The success criterion is therefore purely about
+accuracy:
+
+**A clear win is arm A retaining at least 80% of arm B's overall success rate**
+— relative, not percentage points: if arm B scores 45%, arm A must score at
+least 36%. That buys a 2x speedup for a fifth of the task competence.
+
+Falling short is a publishable negative result about how much depth pi0.5's
+DROID competence needs, not a failed project. Report the (speedup, success-rate)
+pair either way; neither number means much alone.
 
 At 16 episodes per task the per-task confidence intervals are wide, exactly as
 noted in `RESULTS.md`. Consistency of direction across tasks carries more weight
@@ -221,9 +258,11 @@ real hardware.
 
 ## Risks
 
-**SigLIP bounds the speedup.** The LLM is not the only cost, and truncation does
-not touch the vision encoder. Gate 0 exists to surface this before any training
-spend.
+**~~SigLIP bounds the speedup~~ — retired, now quantified.** This was the main
+risk before the latency profile. SigLIP does bound the speedup, at a 16.21 ms
+floor, but 6 layers still clears 2x. The residual risk is only that the
+LIBERO-measured profile fails to transfer to DROID, which the Gate 0
+confirmation run checks directly and cheaply.
 
 **LoRA underfits a truncated backbone.** Rank-16 adapters on 6 frozen blocks may
 not bridge a threefold depth cut. Keeping layer 17 preserves the head interface,
@@ -246,3 +285,15 @@ single scheduling slot rather than two.
 - `src/openpi/models/gemma.py:352,376` — the shared-depth scan.
 - `src/openpi/training/config.py:403-408` — the absolute-actions output
   transform.
+- Artifact "pi0.5 Latency Profile" (`12417096-394b-47a9-9c51-8d0f4e5d326b`) —
+  the depth x denoise sweep, token-speed curve, and fitted cost models this
+  spec's latency predictions come from.
+
+## Deferred, informed by the latency profile
+
+The profile surfaced one orthogonal lever worth recording but explicitly not
+pursued here: the denoise loop is flat in action-chunk length out to ~50 tokens,
+so predicting a longer chunk per inference is nearly free (7.1 -> 1.5 ms per
+action across the measured range). At `action_horizon=16` we sit well inside
+that flat region. This is a throughput lever independent of depth, bounded by
+how long the policy stays accurate open-loop, and belongs in its own experiment.

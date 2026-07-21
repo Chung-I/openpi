@@ -34,9 +34,11 @@ fi
 export TRITON_CACHE_DIR="$HOME/.triton"
 export XDG_CACHE_HOME="$HOME/.cache"
 export HF_HOME=/work/roboleon1295/hf_cache
-# uv's cache follows HOME, but be explicit: the user's /home quota is the binding limit
-# on this cluster (not filesystem space), and a full quota fails builds mid-run.
-export UV_CACHE_DIR="${UV_CACHE_DIR:-/work/roboleon1295/.uv-cache}"
+# Pin the cache to the single canonical location. uv's cache follows HOME, and the HOME
+# override above would otherwise silently start a SECOND uv cache under jobhome, re-
+# downloading everything. /home is off limits regardless: the binding limit there is a
+# per-user quota, not filesystem space, and a full quota fails builds mid-run.
+export UV_CACHE_DIR="${UV_CACHE_DIR:-/work/roboleon1295/.cache/uv}"
 
 # TF's GCS client (tf.data streaming the DROID RLDS shards) needs a CA bundle, and these
 # nodes have no /etc/ssl/certs/ca-certificates.crt -- it is a RHEL-family image carrying

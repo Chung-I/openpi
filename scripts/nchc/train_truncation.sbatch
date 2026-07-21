@@ -22,8 +22,15 @@ OPENPI_ROOT="${OPENPI_ROOT:-/work/roboleon1295/openpi}"
 cd "$OPENPI_ROOT" || { echo "FATAL: cd $OPENPI_ROOT failed"; exit 1; }
 
 # Keep caches off /home: it has a 100G quota and a full quota breaks runs mid-flight.
+# NOTE: this also moves where wandb looks for credentials. ~/.netrc must already exist
+# under the new HOME or wandb runs unauthenticated and the run is not tracked --
+# see docs/eval/TRUNCATION.md section 2.
 export HOME=/work/roboleon1295/jobhome
 mkdir -p "$HOME/.triton" "$HOME/.cache"
+if [ ! -f "$HOME/.netrc" ]; then
+  echo "FATAL: $HOME/.netrc missing -- wandb would run unauthenticated. Copy it first."
+  exit 1
+fi
 export TRITON_CACHE_DIR="$HOME/.triton"
 export XDG_CACHE_HOME="$HOME/.cache"
 export HF_HOME=/work/roboleon1295/hf_cache

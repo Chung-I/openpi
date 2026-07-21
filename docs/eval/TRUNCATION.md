@@ -62,6 +62,31 @@ job fails immediately with no log to explain why:
 mkdir -p /work/roboleon1295/openpi/logs
 ```
 
+The script also overrides `HOME` to keep caches off the quota-limited `/home`, which moves
+where wandb looks for credentials. Copy the credential into the job's `HOME` once, or the
+run trains untracked:
+
+```bash
+mkdir -p /work/roboleon1295/jobhome
+cp -p ~/.netrc /work/roboleon1295/jobhome/.netrc
+```
+
+The script asserts this file exists and aborts if it does not.
+
+To run from a git worktree instead of the main checkout — useful when the main checkout has
+unrelated uncommitted work — set `OPENPI_ROOT` and override `--output`, since Slurm opens
+that path before the script body runs and so cannot expand the variable:
+
+```bash
+OPENPI_ROOT=/work/roboleon1295/openpi-trunc \
+  sbatch --output=/work/roboleon1295/openpi-trunc/logs/trunc_%j.log \
+    scripts/nchc/train_truncation.sbatch
+```
+
+Note the worktree needs its own venv (`uv venv --python 3.11 && uv sync --group rlds`):
+openpi is installed editable, so a worktree sharing the main checkout's venv would silently
+import the main checkout's code. The `rlds` group is required — DROID training reads RLDS.
+
 ```bash
 sbatch scripts/nchc/train_truncation.sbatch
 ```

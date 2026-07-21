@@ -143,10 +143,16 @@ tokens):
 | 3 | 24.8 ms | 2.66x |
 | 1 | 19.3 ms | 3.41x |
 
-The profile transfers from LIBERO to DROID essentially unchanged. DROID's flow
-path builds 3 image slots — 2 real plus 1 zero-filled and masked
-(`droid_policy.py:49-51`) — giving the same 3 x 256 + 200 = 968 prefix tokens
-LIBERO has. `action_horizon=16` versus LIBERO's 10 sits inside the flat region of
+The profile transfers from LIBERO to DROID essentially unchanged, because both
+present the model with a 968-token prefix.
+
+The DROID dataset itself has three cameras — `exterior_image_1_left`,
+`exterior_image_2_left`, `wrist_image_left` — but the loader samples only **one
+of the two exteriors per trajectory**, pairing it with the wrist
+(`droid_rlds_dataset.py:129-136`; the random choice acts as a viewpoint
+augmentation). Those 2 images are then padded to 3 model slots, the third
+zero-filled and masked (`droid_policy.py:49-51`), giving 3 x 256 + 200 = 968
+prefix tokens — the same as LIBERO. `action_horizon=16` versus LIBERO's 10 sits inside the flat region of
 the measured action-token curve (22.9 ms at L=2 rising only to 24.5 ms at L=50),
 so it is within noise.
 

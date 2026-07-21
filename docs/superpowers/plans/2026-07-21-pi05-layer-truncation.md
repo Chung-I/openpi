@@ -543,8 +543,13 @@ def test_arms_freeze_everything_except_lora(name):
     abstract_model = nnx.eval_shape(config.model.create, jax.random.key(0))
     trainable = nnx.state(abstract_model, nnx.All(nnx.Param, nnx.Not(config.freeze_filter))).flat_state()
     assert trainable, "expected some trainable params"
+    # NOTE: paths are tuples of path elements and LoRA params are named "lora_a"/"lora_b",
+    # so `"lora" in path` (exact-element membership) is ALWAYS False. Substring-match each
+    # element instead. Verified: this yields exactly 20 trainable params, all LoRA.
     for path in trainable:
-        assert "lora" in path, f"{path} is trainable but is not a LoRA param"
+        assert any("lora" in element for element in path), f"{path} is trainable but is not a LoRA param"
+    # SigLIP especially must stay frozen: training it on DROID collapsed this policy to 0%.
+    assert not any("img" in path for path in trainable), "SigLIP must be frozen"
 
 
 @pytest.mark.parametrize("name", TRUNCATION_ARMS)

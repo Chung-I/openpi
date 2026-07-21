@@ -33,6 +33,14 @@ Runs on a single RTX 5090 — inference of a 3B bf16 model needs ~6 GB.
 
 ## 2. Train
 
+Before the first `sbatch`, create the directory Slurm's `--output` writes to — Slurm opens
+that path *before* the script body runs, so an in-script `mkdir` cannot create it and the
+job fails immediately with no log to explain why:
+
+```bash
+mkdir -p /work/roboleon1295/openpi/logs
+```
+
 ```bash
 sbatch scripts/nchc/train_truncation.sbatch
 ```
@@ -43,6 +51,11 @@ rather than after the checkpoint downloads.
 
 Watch the first 100 steps in wandb (project `layer-truncation`). Arm A starting far above
 arm B and failing to descend means LoRA is not bridging the depth cut — see Escalation.
+
+Neither arm's `TrainConfig` sets `resume` or `overwrite`. If the 48h wall-clock limit is hit
+and Slurm requeues the job, training restarts at step 0 by default and then fails on the
+already-existing checkpoint directory from the previous attempt. If requeuing after a
+timeout, the operator should set `resume=True` (and not `overwrite`) before resubmitting.
 
 ## 3. Serve
 
@@ -62,6 +75,9 @@ subcommand.
 ## 4. Evaluate
 
 RoboLab, 5 tasks x 16 episodes, matching `docs/eval/RESULTS.md` so results are comparable.
+Note: `docs/eval/RESULTS.md` — the source of the vanilla 40% / K=1 42% / K=6 52% baselines
+below — lives on the `mem-video-encoder-d-eval` branch, not on this branch or `main`; a
+reader working only from this branch will not find it in their checkout.
 
 ```bash
 python policies/pi0_family/run.py --remote-host <host> --remote-port 8000 \
@@ -73,7 +89,11 @@ python policies/pi0_family/run.py --remote-host <host> --remote-port 8000 \
 
 Two deltas, both stated explicitly:
 
-- **A minus B** — truncation alone, finetuning held constant.
+- **A minus B** — same seed, data, steps, schedule, base params and norm stats in both arms,
+  so this isolates depth. But it does not isolate depth *alone*: LoRA adapters live inside
+  the scanned block, so arm A trains on 6 blocks' worth of adapters and arm B on 18 — a
+  third the trainable adapter capacity. A minus B therefore measures depth reduction and
+  adapter-capacity reduction jointly, not truncation with finetuning held perfectly constant.
 - **A minus vanilla (40%)** — the practical question, confounded with finetuning; label it.
 
 Success: arm A retains at least 80% of arm B's overall success rate (relative — if B

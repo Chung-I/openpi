@@ -603,6 +603,10 @@ def _truncation_arm(keep_layers: tuple[int, ...]) -> TrainConfig:
             "gs://openpi-assets-simeval/pi05_droid_jointpos/params",
             keep_layers=keep_layers,
         ),
+        # `decay_steps=1_000_000` with `peak_lr == decay_lr == 5e-5` over a 20k-step run means
+        # the cosine decay never actually decays within this run -- after warmup, LR is just a
+        # constant 5e-5. Intentional (copied from `pi05_full_droid_finetune`), not a bug, but
+        # it reads like a decay schedule at a glance, so: it isn't one here.
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=5e-5,

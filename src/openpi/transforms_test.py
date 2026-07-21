@@ -26,6 +26,21 @@ def test_delta_actions():
     assert np.all(transformed["actions"] == np.array([[3, 2, 5], [5, 4, 7]]))
 
 
+def test_delta_actions_accepts_read_only_input():
+    """tf.data hands the RLDS pipeline read-only arrays, so the transform must not
+    mutate its input in place. Without the copy this raises
+    'ValueError: output array is read-only' and DROID RLDS training dies at step 0."""
+    actions = np.array([[3, 4, 5], [5, 6, 7]])
+    actions.flags.writeable = False
+    item = {"state": np.array([1, 2, 3]), "actions": actions}
+
+    transformed = _transforms.DeltaActions(mask=[False, True])(item)
+
+    assert np.all(transformed["actions"] == np.array([[3, 2, 5], [5, 4, 7]]))
+    # The caller's array must be left untouched.
+    assert np.all(actions == np.array([[3, 4, 5], [5, 6, 7]]))
+
+
 def test_delta_actions_noop():
     item = {"state": np.array([1, 2, 3]), "actions": np.array([[3, 4, 5], [5, 6, 7]])}
 

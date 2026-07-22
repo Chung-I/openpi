@@ -191,6 +191,52 @@ python policies/pi0_family/run.py --remote-host <host> --remote-port 8000 \
   --task BananaInBowlTask BagelsOnPlateTask BowlInBinTask MarkerInMugTask MustardInRightBinTask
 ```
 
+### Evaluation result (2026-07-22) — FAILED the success bar
+
+Both 19999 checkpoints served from NCHC (jobs 203650 / 203651) over tailscale, RoboLab sim
+client local, 5 tasks x 16 episodes, `open_loop_horizon` left at the pi05 default of 15 to
+match how the published baselines were evaluated.
+
+| task | trunc6 (6 layers) | trunc18 (control) | published vanilla |
+|---|---|---|---|
+| BananaInBowl | 0/16 = 0% | **15/16 = 93.8%** | 88% |
+| BowlInBin | 0/16 = 0% | 9/16 = 56.2% | 31% |
+| MarkerInMug | 0/16 = 0% | 2/16 = 12.5% | 6% |
+| MustardInRightBin | 0/16 = 0% | 2/16 = 12.5% | 75% |
+| BagelsOnPlate | 0/16 = 0% | 0/16 = 0% | 0% |
+| **OVERALL** | **0/80 = 0.0%** | **28/80 = 35.0%** | 32/80 = 40% |
+
+**A − B = −35.0 pp. Arm A retains 0% of the control's success rate, against an 80% bar.**
+The 6-layer model fails every episode of every task.
+
+**The control validates the instrument.** 93.8% on BananaInBowl reproduces the documented
+94% vanilla zero-shot result, and BagelsOnPlate at 0% matches every published arm. An
+18-layer model through the *identical* truncation code path, weight loader, training recipe,
+serving stack and eval harness comes out at full strength — so the pipeline is correct, the
+LoRA recipe is sound, and arm A's failure is a real property of truncation rather than a bug.
+
+The control lands 5 pp below published vanilla (35% vs 40%), driven almost entirely by
+MustardInRightBin (12.5% vs 75%). That task is known to be volatile across arms — the MEM
+runs recorded 56% / 81% / 75% on it — so the aggregate gap is within the noise this suite
+produces at 16 episodes, but it is a real per-task discrepancy and is not explained here.
+
+**Flow loss badly understated the damage.** Arm A's loss was ~2.8x the control's, which
+reads as degraded-but-working. Task success went 93.8% to 0%. Treat flow loss as a poor
+proxy for competence when comparing architectures of different depth.
+
+**Serving plumbing was verified independently**, before the control finished, by probing the
+trunc6 server directly: actions came back correctly shaped (16, 8), anchored at the current
+pose (`max|action[0] − state|` = 0.062 rad) and smooth (max per-step delta 0.018 rad). So
+`AbsoluteActions`, normalization and the flow head are all correct — the model emits
+well-formed actions, it just cannot do the tasks. (Caveat: that probe used random-noise
+images, so it establishes format correctness, not competence.)
+
+**What this does NOT establish.** Arm A carries one third of the control's LoRA parameters,
+since adapters live inside the scanned block. This result therefore shows that *6 layers with
+1/3 the adapter capacity, recovered by LoRA alone* fails — not that 6 layers is inherently
+incapable. The escalation ladder below is untested and is the direct response to this
+outcome.
+
 ## 5. Report
 
 Two deltas, both stated explicitly:

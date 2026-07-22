@@ -276,6 +276,36 @@ Re-running full rank with SigLIP frozen to a data-matched 10k costs ~3h and dist
 them. Until that is done, this result does NOT establish that 6 layers is inherently
 incapable.
 
+### Data scaling flips the conclusion (2026-07-23)
+
+The 0/80 results above were a red herring about DEPTH. They were all measured at ~10% of a
+DROID epoch (2.56M samples). The best-effort 100k run (batch 256, 100k steps, nothing
+frozen) was evaluated at two checkpoints from the SAME run:
+
+| checkpoint | samples | Banana | Bowl | Marker | Mustard | Bagels | OVERALL |
+|---|---|---|---|---|---|---|---|
+| 10k | 2.56M | 0/16 | 0/16 | 0/16 | 0/16 | 0/16 | **0/80 = 0%** |
+| 20k | 5.12M | 7/16 = 44% | 0/16 | 0/16 | 1/16 | 0/16 | **8/80 = 10%** |
+| 18L control | 2.56M | 15/16 = 94% | 9/16 | 2/16 | 2/16 | 0/16 | 28/80 = 35% |
+
+**Doubling the data took the 6-layer model from 0% to 10% overall, and BananaInBowl from 0%
+to 44%.** The earlier conclusion -- reinforced by the full-rank arm also scoring 0/80 at
+2.56M -- that "6 layers cannot do these tasks" was premature. At 2.56M the truncated model
+was DATA-STARVED, not necessarily depth-limited. The 18-layer control succeeded at the same
+data because more depth needs less data to become useful, not because 6 layers is incapable.
+
+The recovery is task-ordered so far: the easiest task (Banana, control 94%) crosses first;
+harder tasks (Bowl 56%, Mustard/Marker ~12% on the control) are still at or near zero at 20k.
+Whether they follow with more data is what the remaining 80k steps (up to 25.6M samples, 5x
+the 20k checkpoint) will show.
+
+**Process note, recorded deliberately:** at the 20k eval the running assistant had twice
+recommended KILLING this run based on the 0/80 results, reasoning "more data rarely rescues a
+policy scoring zero." That reasoning was wrong here -- more data was exactly what it needed.
+The run was allowed to continue only because a cheap 20k-checkpoint eval was run before
+acting on the recommendation. Lesson: at 10% of an epoch, a 0% RoboLab score is not evidence
+of a capability ceiling.
+
 ## 5. Report
 
 Two deltas, both stated explicitly:

@@ -557,29 +557,48 @@ class TrainConfig:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
 
-def _truncation_arm(keep_layers: tuple[int, ...]) -> TrainConfig:
+def _truncation_arm(keep_layers: tuple[int, ...], *, full_rank: bool = False) -> TrainConfig:
     """One arm of the layer-truncation experiment.
 
     Arm A keeps 6 of 18 layers; arm B keeps all 18 and is the control that separates the
     cost of truncation from the effect of finetuning. Everything except `keep_layers` is
     identical between arms by construction -- that is the point of building both here.
+
+    `full_rank` trains the kept blocks themselves instead of LoRA adapters. The LoRA arms
+    scored 0/80 on RoboLab, but LoRA adapters live INSIDE the scanned block, so the 6-layer
+    arm also carried only a third of the control's adapter capacity -- the result cannot
+    distinguish "6 layers is too shallow" from "1/3 the adapters is too little". Full rank
+    removes that confound by giving the truncated arm MORE trainable capacity than the LoRA
+    control had. It is also what openpi's own `pi05_droid_finetune` and
+    `pi05_full_droid_finetune` do; LoRA-only was the deviation here, inherited from the MEM
+    experiments where minimal perturbation was the right call.
+
+    Everything else -- data, steps, batch, seed, schedule, base weights -- is held identical
+    to the LoRA arms, so a difference is attributable to trainable capacity alone.
     """
+    suffix = "_fullrank" if full_rank else ""
     return TrainConfig(
-        name=f"pi05_droid_jointpos_trunc{len(keep_layers)}",
-        exp_name=f"pi05_droid_jointpos_trunc{len(keep_layers)}",
+        name=f"pi05_droid_jointpos_trunc{len(keep_layers)}{suffix}",
+        exp_name=f"pi05_droid_jointpos_trunc{len(keep_layers)}{suffix}",
         project_name="layer-truncation",
         model=pi0_config.Pi0Config(
             pi05=True,
             action_dim=32,
             action_horizon=16,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
+            paligemma_variant="gemma_2b" if full_rank else "gemma_2b_lora",
+            action_expert_variant="gemma_300m" if full_rank else "gemma_300m_lora",
             keep_layers=keep_layers,
         ),
-        # Train LoRA adapters only. Deliberately NOT Pi0Config.get_freeze_filter(): that
-        # freezes only ".*llm.*", leaving SigLIP trainable, which previously fully trained
-        # SigLIP on DROID and collapsed this exact policy to a timid 0%.
-        freeze_filter=nnx.Not(nnx_utils.PathRegex(".*lora.*")),
+        # Deliberately NOT Pi0Config.get_freeze_filter() in either mode: it freezes only
+        # ".*llm.*", leaving SigLIP trainable, which previously fully trained SigLIP on DROID
+        # and collapsed this exact policy to a timid 0%.
+        #
+        # full_rank: freeze ONLY SigLIP, so the kept blocks, final norms and action
+        #   projections all train. `pi05_droid_finetune` trains SigLIP too, but given the
+        #   recorded collapse this arm does not stack that risk on top of an already-failing
+        #   configuration. Unfreezing SigLIP is the next lever if full rank is not enough.
+        # otherwise: train LoRA adapters only.
+        freeze_filter=(nnx_utils.PathRegex(".*img.*") if full_rank else nnx.Not(nnx_utils.PathRegex(".*lora.*"))),
         data=RLDSDroidDataConfig(
             repo_id="droid",
             rlds_data_dir="gs://gresearch/robotics",
@@ -989,6 +1008,9 @@ _CONFIGS = [
     #
     _truncation_arm((0, 3, 7, 11, 14, 17)),
     _truncation_arm(tuple(range(18))),
+    # Escalation after the LoRA arms scored 0/80: full-rank the kept blocks. See the
+    # docstring above for why this is the experiment that disambiguates depth from capacity.
+    _truncation_arm((0, 3, 7, 11, 14, 17), full_rank=True),
     #
     # ALOHA Sim configs. This config is used to demonstrate how to train on a simple simulated environment.
     #

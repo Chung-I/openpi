@@ -237,6 +237,45 @@ since adapters live inside the scanned block. This result therefore shows that *
 incapable. The escalation ladder below is untested and is the direct response to this
 outcome.
 
+### Escalation results (2026-07-23) — full rank does not rescue it either
+
+After the LoRA arms scored 0/80, two escalations were run. Because the escalation uses
+batch 256 against the LoRA arms' 128, **step 10k here equals the LoRA arms' full 20k run in
+samples seen (2.56M)** — so this is a data-matched comparison, not a step-matched one.
+
+| arm @ 2.56M samples | trainable | SigLIP | flow loss | RoboLab |
+|---|---|---|---|---|
+| 6L LoRA | 16.7 M | frozen | 0.02911 | **0/80 = 0%** |
+| 6L full rank | 1749 M | **trains** | **0.01656** | **0/80 = 0%** |
+| 18L LoRA control | 16.7 M | frozen | 0.01046 | **28/80 = 35%** |
+
+**80x the trainable capacity and 43% lower loss produced exactly zero change in task
+success.** The gap to the control closed from 2.78x to 1.58x in loss terms and not at all in
+success terms. Per-task, the full-rank arm scored 0/16 on every task including BananaInBowl
+(control 15/16) and BowlInBin (control 9/16).
+
+Trajectory metrics say the arm is not frozen but wandering: EE SPARC -7.68 against the
+control's -5.03, path length 2.03 m against 1.47 m. It moves more, less smoothly, and
+completes nothing.
+
+**Flow loss is not a usable proxy for competence across depths.** This is the second and
+more emphatic demonstration: the first was 2.8x loss reading as "degraded but working" while
+success went 93.8% -> 0%.
+
+**Two explanations remain open, and the experiment that separates them was destroyed.** An
+earlier full-rank arm with SigLIP FROZEN was cancelled at 11.6k and its checkpoints deleted
+during a storage cleanup; that arm was the control for this question.
+
+1. *Depth is the wall* — 6 layers cannot represent these tasks under any recipe.
+2. *Training SigLIP broke visual grounding* — project memory records exactly this failure
+   ("SigLIP fully trained on DROID -> wrecked pretrained visual features"). It fits: flow
+   loss improves because action sequences remain predictable from proprioception, while task
+   success stays at zero because the policy can no longer localise the object.
+
+Re-running full rank with SigLIP frozen to a data-matched 10k costs ~3h and distinguishes
+them. Until that is done, this result does NOT establish that 6 layers is inherently
+incapable.
+
 ## 5. Report
 
 Two deltas, both stated explicitly:

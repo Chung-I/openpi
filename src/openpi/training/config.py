@@ -557,7 +557,18 @@ class TrainConfig:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
 
-def _truncation_arm(keep_layers: tuple[int, ...], *, full_rank: bool = False) -> TrainConfig:
+def _truncation_arm(
+    keep_layers: tuple[int, ...],
+    *,
+    full_rank: bool = False,
+    freeze_nothing: bool = False,
+    batch_size: int = 128,
+    num_train_steps: int = 20_000,
+    fsdp_devices: int = 4,
+    save_interval: int = 2_500,
+    keep_period: int = 5_000,
+    name_suffix: str = "",
+) -> TrainConfig:
     """One arm of the layer-truncation experiment.
 
     Arm A keeps 6 of 18 layers; arm B keeps all 18 and is the control that separates the
@@ -576,7 +587,7 @@ def _truncation_arm(keep_layers: tuple[int, ...], *, full_rank: bool = False) ->
     Everything else -- data, steps, batch, seed, schedule, base weights -- is held identical
     to the LoRA arms, so a difference is attributable to trainable capacity alone.
     """
-    suffix = "_fullrank" if full_rank else ""
+    suffix = ("_fullrank" if full_rank else "") + name_suffix
     return TrainConfig(
         name=f"pi05_droid_jointpos_trunc{len(keep_layers)}{suffix}",
         exp_name=f"pi05_droid_jointpos_trunc{len(keep_layers)}{suffix}",
@@ -593,12 +604,20 @@ def _truncation_arm(keep_layers: tuple[int, ...], *, full_rank: bool = False) ->
         # ".*llm.*", leaving SigLIP trainable, which previously fully trained SigLIP on DROID
         # and collapsed this exact policy to a timid 0%.
         #
-        # full_rank: freeze ONLY SigLIP, so the kept blocks, final norms and action
-        #   projections all train. `pi05_droid_finetune` trains SigLIP too, but given the
-        #   recorded collapse this arm does not stack that risk on top of an already-failing
-        #   configuration. Unfreezing SigLIP is the next lever if full rank is not enough.
+        # freeze_nothing: train EVERYTHING including SigLIP -- upstream's own recipe
+        #   (`pi05_droid_finetune` and `pi05_full_droid_finetune` both set no freeze filter).
+        #   The recorded "training SigLIP collapsed the policy" failure had a different shape:
+        #   there SigLIP trained while the LLM was LoRA-only and effectively frozen, so vision
+        #   features drifted away from what a frozen language model expected. That was an
+        #   IMBALANCE failure. Here everything co-adapts, as upstream does.
+        # full_rank: freeze only SigLIP, so the kept blocks, final norms and action
+        #   projections train. Kept for the matched-comparison arm.
         # otherwise: train LoRA adapters only.
-        freeze_filter=(nnx_utils.PathRegex(".*img.*") if full_rank else nnx.Not(nnx_utils.PathRegex(".*lora.*"))),
+        freeze_filter=(
+            nnx.Nothing()
+            if freeze_nothing
+            else (nnx_utils.PathRegex(".*img.*") if full_rank else nnx.Not(nnx_utils.PathRegex(".*lora.*")))
+        ),
         data=RLDSDroidDataConfig(
             repo_id="droid",
             rlds_data_dir="gs://gresearch/robotics",
@@ -632,13 +651,14 @@ def _truncation_arm(keep_layers: tuple[int, ...], *, full_rank: bool = False) ->
             decay_steps=1_000_000,
             decay_lr=5e-5,
         ),
-        fsdp_devices=4,
-        num_train_steps=20_000,
-        batch_size=128,
+        fsdp_devices=fsdp_devices,
+        num_train_steps=num_train_steps,
+        batch_size=batch_size,
         seed=42,
-        save_interval=2_500,
-        # Retains 5k/10k/15k/20k permanently so both arms can be read at matched steps.
-        keep_period=5_000,
+        save_interval=save_interval,
+        # Default retains 5k/10k/15k/20k permanently so both arms can be read at matched
+        # steps. Checkpoints are ~16G each, so longer runs widen this rather than keep 20+.
+        keep_period=keep_period,
         num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
     )
 
@@ -1010,7 +1030,31 @@ _CONFIGS = [
     _truncation_arm(tuple(range(18))),
     # Escalation after the LoRA arms scored 0/80: full-rank the kept blocks. See the
     # docstring above for why this is the experiment that disambiguates depth from capacity.
+    # Held at batch 128 / 20k so it is matched to the LoRA arms -- that matching is what makes
+    # the depth-vs-capacity attribution clean.
     _truncation_arm((0, 3, 7, 11, 14, 17), full_rank=True),
+    # Best-effort arm: stop matching the LoRA experiment and give the 6-layer model the best
+    # known recipe for full DROID. Mirrors `pi05_full_droid_finetune` exactly -- batch 256,
+    # 100k steps (~1 DROID epoch), nothing frozen, and its deliberately FLAT 5e-5 schedule
+    # (that config sets decay_lr == peak_lr on purpose; it is not a stale default).
+    #
+    # fsdp_devices=1 like upstream: at 1.75B params the whole model replicates comfortably on
+    # a 141G card, so sharding would buy memory we do not need and cost communication.
+    #
+    # Every earlier arm trained on ~10% of a DROID epoch (20k x 128 = 2.56M samples against
+    # upstream's 100k x 256 = 25.6M). Those runs were data-starved as well as low-capacity,
+    # which is why this arm -- not the matched ones -- is the real test of whether 6 layers work.
+    _truncation_arm(
+        (0, 3, 7, 11, 14, 17),
+        full_rank=True,
+        freeze_nothing=True,
+        batch_size=256,
+        num_train_steps=100_000,
+        fsdp_devices=1,
+        save_interval=5_000,
+        keep_period=20_000,
+        name_suffix="_100k",
+    ),
     #
     # ALOHA Sim configs. This config is used to demonstrate how to train on a simple simulated environment.
     #

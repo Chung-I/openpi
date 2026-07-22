@@ -147,3 +147,53 @@ def test_fullrank_arm_matches_the_lora_arm_on_everything_else():
     assert a.weight_loader.params_path == b.weight_loader.params_path
     assert a.data.datasets == b.data.datasets
     assert a.model.action_horizon == b.model.action_horizon
+
+
+def test_100k_arm_trains_everything_including_siglip():
+    """Best-effort arm: nothing frozen, matching upstream's own full-DROID recipe."""
+    ours = _config.get_config("pi05_droid_jointpos_trunc6_fullrank_100k")
+    upstream = _config.get_config("pi05_full_droid_finetune")
+
+    abstract = nnx.eval_shape(ours.model.create, jax.random.key(0))
+    trainable = nnx.state(abstract, nnx.All(nnx.Param, nnx.Not(ours.freeze_filter))).flat_state()
+    everything = nnx.state(abstract, nnx.Param).flat_state()
+    assert len(trainable) == len(everything), "nothing may be frozen on this arm"
+    assert any("img" in path for path in trainable), "SigLIP must train here"
+
+    # Same freeze behaviour as upstream, and the same deliberately FLAT schedule.
+    assert type(ours.freeze_filter) is type(upstream.freeze_filter)
+    assert ours.lr_schedule.peak_lr == ours.lr_schedule.decay_lr == 5e-5
+    assert ours.fsdp_devices == upstream.fsdp_devices == 1
+
+
+def test_100k_arm_matches_pi05_full_droid_finetune_budget():
+    """The 100k arm exists to match upstream's full-DROID recipe, not the LoRA arms."""
+    ours = _config.get_config("pi05_droid_jointpos_trunc6_fullrank_100k")
+    upstream = _config.get_config("pi05_full_droid_finetune")
+
+    assert ours.num_train_steps == upstream.num_train_steps == 100_000
+    assert ours.batch_size == upstream.batch_size == 256
+    # Same schedule and optimizer as the upstream full-DROID recipe.
+    assert ours.lr_schedule == upstream.lr_schedule
+    assert ours.optimizer == upstream.optimizer
+    assert ours.ema_decay == upstream.ema_decay
+    assert ours.model.action_horizon == upstream.model.action_horizon
+    # Still truncated, still full rank, still SigLIP-frozen.
+    assert ours.model.keep_layers == (0, 3, 7, 11, 14, 17)
+    assert ours.model.paligemma_variant == "gemma_2b"
+
+
+def test_100k_arm_does_not_disturb_the_matched_arms():
+    """Adding it must not change the configs that already ran, or the record is lost."""
+    lora = _config.get_config("pi05_droid_jointpos_trunc6")
+    matched = _config.get_config("pi05_droid_jointpos_trunc6_fullrank")
+    for cfg in (lora, matched):
+        assert cfg.batch_size == 128
+        assert cfg.num_train_steps == 20_000
+        assert cfg.fsdp_devices == 4
+        assert cfg.save_interval == 2_500
+        assert cfg.keep_period == 5_000
+    # The matched full-rank arm must still freeze SigLIP -- that is what makes it matched.
+    matched_abstract = nnx.eval_shape(matched.model.create, jax.random.key(0))
+    matched_trainable = nnx.state(matched_abstract, nnx.All(nnx.Param, nnx.Not(matched.freeze_filter))).flat_state()
+    assert not any("img" in path for path in matched_trainable)

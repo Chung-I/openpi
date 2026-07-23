@@ -340,6 +340,38 @@ Statistical honesty: every cell is n=16 (Wilson 95% CI on a single task spans ~2
 and the 20k vs 40k aggregates (both 10%, CI [5-19]%) are statistically indistinguishable.
 Treat per-checkpoint task numbers as directional, not precise.
 
+### 60k checkpoint: plateau breaks, recovery resumes (2026-07-23)
+
+| task | 10k | 20k | 40k | 60k | 18L ctrl |
+|---|---|---|---|---|---|
+| samples | 2.56M | 5.12M | 10.24M | 15.4M | 2.56M |
+| BananaInBowl | 0% | 44% | 25% | 38% | 94% |
+| MustardInRightBin | 0% | 6% | 25% | 25% | 12% |
+| BowlInBin | 0% | 0% | 0% | **12%** | 56% |
+| MarkerInMug | 0% | 0% | 0% | 0% | 12% |
+| BagelsOnPlate | 0% | 0% | 0% | 0% | 0% |
+| **OVERALL** | **0%** | **10%** | **10%** | **15%** | **35%** |
+| non-zero tasks | 0 | 2 | 2 | **3** | 4 |
+
+The 20k->40k plateau was NOT the ceiling. At 60k the aggregate rises to 15% and **BowlInBin
+breaks off a zero it held for three straight checkpoints** (0/0/0 -> 2/16). Non-zero task
+count goes 2 -> 2 -> 3. So the earlier "data scaling plateaus at ~10%" read (written at 40k)
+was itself premature -- the plateau was a pause, not a wall.
+
+The corrected trajectory: the 6-layer model recovers with data, but SLOWLY and
+TASK-BY-TASK, each task crossing off zero at a different data budget (Banana ~5M, Mustard
+~5M, BowlInBin ~15M). MarkerInMug is still at zero at 15.4M (control only 12%, so it has the
+least headroom and may need the most data). MustardInRightBin at 60k (25%) already exceeds
+the control's 12% -- on the tasks it can do, the truncated model is competitive.
+
+Trend, not plateau, and not yet converged: with 40k steps still to run (up to 25.6M samples)
+the aggregate is rising, not flat. The open question is now where it tops out relative to the
+control's 35%, not whether 6 layers can work at all -- it demonstrably can, on 3 of 5 tasks.
+
+Statistical honesty unchanged: every cell is n=16. The 12/80 vs 8/80 step (15% vs 10%) has
+overlapping CIs ([9-24]% vs [5-19]%), so the aggregate rise is suggestive; the BowlInBin
+qualitative change (three zeros then non-zero) is the firmer signal.
+
 ## 5. Report
 
 Two deltas, both stated explicitly:

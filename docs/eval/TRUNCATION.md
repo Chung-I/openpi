@@ -407,6 +407,51 @@ data-efficiency (it needs more samples to reach the same competence), not in a h
 That is a far more favorable result for the 2.14x speedup than any earlier checkpoint
 suggested.
 
+### 100k (final, full DROID epoch): the curve does NOT keep climbing (2026-07-24)
+
+Training complete: 100k steps, 25.6M samples, COMPLETED exit 0:0, final loss 0.0129 (control
+~0.0105). Full trajectory, all checkpoints of the same run plus the LoRA control:
+
+| task | 20k | 40k | 60k | 80k | 100k | 18L ctrl |
+|---|---|---|---|---|---|---|
+| samples | 5M | 10M | 15M | 20M | 25.6M | 2.6M |
+| BananaInBowl | 44% | 25% | 38% | 75% | **81%** | 94% |
+| MustardInRightBin | 6% | 25% | 25% | 38% | **6%** | 12% |
+| BowlInBin | 0% | 0% | 12% | 19% | **6%** | 56% |
+| MarkerInMug | 0% | 0% | 0% | 0% | **0%** | 12% |
+| BagelsOnPlate | 0% | 0% | 0% | 0% | 0% | 0% |
+| **OVERALL** | **10%** | **10%** | **15%** | **26%** | **19%** | **35%** |
+
+**The aggregate went DOWN from 80k to 100k (26% -> 19%), not up.** I had been narrating a
+curve climbing toward the control; the final full-epoch checkpoint refutes that. 80k
+[18-37]% and 100k [12-29]% overlap, so this is not a statistically clean regression, but the
+point estimate fell and the "still rising" story is not supported by the endpoint.
+
+What actually happened, task by task:
+- **BananaInBowl kept rising** (75% -> 81%, ~= control 94%). Only this task shows a clean,
+  monotonic recovery.
+- **MustardInRightBin collapsed** (38% -> 6%) and **BowlInBin fell** (19% -> 6%). These two
+  drove the whole 80k->100k drop. At n=16 each swing is inside the CI, but both moving down
+  together is notable.
+- **MarkerInMug: 0% at every one of six checkpoints.** Never learned.
+
+**Honest final conclusion.** The strong 10k-conclusion ("6 layers is a wall") was wrong --
+BananaInBowl proves a truncated model CAN reach near-full-depth competence on a task given
+enough data. But the optimistic 80k-conclusion ("recovers to near the control, still
+climbing") was ALSO wrong: at the full epoch the 6-layer model sits at 19% against the
+control's 35%, i.e. ~54% of full-depth aggregate, and the per-task picture is volatile rather
+than converging. Competence is real but UNEVEN and UNSTABLE across tasks -- one task at
+ceiling, two bouncing in the single-to-double digits, one dead. The 2.14x speedup is not
+free; at this recipe it costs roughly half the task success and most of the cross-task
+robustness.
+
+Caveats that genuinely limit this: (1) n=16/task -- the 80k->100k wobble is within noise, so
+"peaked at 80k" is suggestive, not proven; a re-eval of 80k and 100k at 50-100 episodes would
+settle whether 80k was a lucky checkpoint. (2) EMA_decay=0.99 means the served 100k weights
+are an EMA that lags the raw weights; not obviously the cause, but not ruled out. (3) The
+SigLIP-frozen ablation was never run, so how much of even this partial recovery came from
+unfreezing vision vs. the extra data remains unattributed.
+
 ## 5. Report
 
 Two deltas, both stated explicitly:

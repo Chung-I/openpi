@@ -11,6 +11,7 @@ from enum import Enum
 from enum import auto
 import json
 import logging
+import os
 from pathlib import Path
 
 import tqdm
@@ -230,7 +231,11 @@ class DroidRldsDataset:
         weights = [dataset.weight for dataset in datasets]
 
         final_dataset = dl.DLataset.sample_from_datasets(all_datasets, weights=weights)
-        final_dataset = final_dataset.shuffle(shuffle_buffer_size)
+        # This buffer fills progressively and dominates host RSS: 250k DROID timesteps
+        # reached ~200G per process on NCHC. DROID_SHUFFLE_BUFFER lets a job shrink it
+        # without a code change when the allocation is the binding constraint. Keep it
+        # >= ~100k -- below that, shuffling is not sufficiently random (see the default).
+        final_dataset = final_dataset.shuffle(int(os.environ.get("DROID_SHUFFLE_BUFFER", shuffle_buffer_size)))
         final_dataset = final_dataset.batch(batch_size)
         # Note =>> Seems to reduce memory usage without affecting speed?
         final_dataset = final_dataset.with_ram_budget(1)

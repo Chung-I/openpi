@@ -87,6 +87,12 @@ class PI0Pytorch(nn.Module):
         self.config = config
         self.pi05 = config.pi05
 
+        if config.keep_layers is not None:
+            raise NotImplementedError(
+                "keep_layers (layer truncation) is supported on the JAX Pi0 path only. "
+                "This PyTorch path would silently build a full-depth model."
+            )
+
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
 

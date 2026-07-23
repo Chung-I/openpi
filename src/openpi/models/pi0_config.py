@@ -34,6 +34,13 @@ class Pi0Config(_model.BaseModelConfig):
 
     pytorch_compile_mode: str | None = "max-autotune"
 
+    # Indices of the original transformer layers to keep, 0-based and ascending, into the
+    # base variant's full stack. None keeps every layer, which is the unmodified model.
+    # Both towers share one nn.scan (see gemma.py), so this truncates the PaliGemma
+    # backbone and the action expert together. Pair with
+    # weight_loaders.LayerSubsetWeightLoader using the same indices.
+    keep_layers: tuple[int, ...] | None = None
+
     def __post_init__(self):
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
@@ -46,6 +53,19 @@ class Pi0Config(_model.BaseModelConfig):
                 "max-autotune",
                 "max-autotune-no-cudagraphs",
             ]
+        if self.keep_layers is not None:
+            # Coerce first: a list field would make this frozen dataclass unhashable.
+            object.__setattr__(self, "keep_layers", tuple(self.keep_layers))
+            base_depth = _gemma.get_config(self.paligemma_variant).depth
+            if not self.keep_layers:
+                raise ValueError("keep_layers must not be empty.")
+            if list(self.keep_layers) != sorted(set(self.keep_layers)):
+                raise ValueError(f"keep_layers must be sorted and unique, got {self.keep_layers}.")
+            if not all(0 <= i < base_depth for i in self.keep_layers):
+                raise ValueError(
+                    f"keep_layers indices must lie in [0, {base_depth}) for variant "
+                    f"'{self.paligemma_variant}', got {self.keep_layers}."
+                )
 
     @property
     @override
@@ -84,6 +104,20 @@ class Pi0Config(_model.BaseModelConfig):
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
 
         return observation_spec, action_spec
+
+    def gemma_configs(self) -> tuple[_gemma.Config, _gemma.Config]:
+        """Returns the (paligemma, action expert) gemma configs.
+
+        Depths are overridden to len(keep_layers) when truncating. Both must match:
+        gemma.Module asserts every expert has the same depth, since they share one scan.
+        """
+        paligemma_config = _gemma.get_config(self.paligemma_variant)
+        action_expert_config = _gemma.get_config(self.action_expert_variant)
+        if self.keep_layers is not None:
+            depth = len(self.keep_layers)
+            paligemma_config = dataclasses.replace(paligemma_config, depth=depth)
+            action_expert_config = dataclasses.replace(action_expert_config, depth=depth)
+        return paligemma_config, action_expert_config
 
     def get_freeze_filter(self) -> nnx.filterlib.Filter:
         """Returns the freeze filter based on the model config."""

@@ -21,6 +21,7 @@ import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.polaris_config as polaris_config
@@ -556,6 +557,112 @@ class TrainConfig:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
 
+def _truncation_arm(
+    keep_layers: tuple[int, ...],
+    *,
+    full_rank: bool = False,
+    freeze_nothing: bool = False,
+    batch_size: int = 128,
+    num_train_steps: int = 20_000,
+    fsdp_devices: int = 4,
+    save_interval: int = 2_500,
+    keep_period: int = 5_000,
+    name_suffix: str = "",
+) -> TrainConfig:
+    """One arm of the layer-truncation experiment.
+
+    Arm A keeps 6 of 18 layers; arm B keeps all 18 and is the control that separates the
+    cost of truncation from the effect of finetuning. Everything except `keep_layers` is
+    identical between arms by construction -- that is the point of building both here.
+
+    `full_rank` trains the kept blocks themselves instead of LoRA adapters. The LoRA arms
+    scored 0/80 on RoboLab, but LoRA adapters live INSIDE the scanned block, so the 6-layer
+    arm also carried only a third of the control's adapter capacity -- the result cannot
+    distinguish "6 layers is too shallow" from "1/3 the adapters is too little". Full rank
+    removes that confound by giving the truncated arm MORE trainable capacity than the LoRA
+    control had. It is also what openpi's own `pi05_droid_finetune` and
+    `pi05_full_droid_finetune` do; LoRA-only was the deviation here, inherited from the MEM
+    experiments where minimal perturbation was the right call.
+
+    Everything else -- data, steps, batch, seed, schedule, base weights -- is held identical
+    to the LoRA arms, so a difference is attributable to trainable capacity alone.
+    """
+    suffix = ("_fullrank" if full_rank else "") + name_suffix
+    return TrainConfig(
+        name=f"pi05_droid_jointpos_trunc{len(keep_layers)}{suffix}",
+        exp_name=f"pi05_droid_jointpos_trunc{len(keep_layers)}{suffix}",
+        project_name="layer-truncation",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=16,
+            paligemma_variant="gemma_2b" if full_rank else "gemma_2b_lora",
+            action_expert_variant="gemma_300m" if full_rank else "gemma_300m_lora",
+            keep_layers=keep_layers,
+        ),
+        # Deliberately NOT Pi0Config.get_freeze_filter() in either mode: it freezes only
+        # ".*llm.*", leaving SigLIP trainable, which previously fully trained SigLIP on DROID
+        # and collapsed this exact policy to a timid 0%.
+        #
+        # freeze_nothing: train EVERYTHING including SigLIP -- upstream's own recipe
+        #   (`pi05_droid_finetune` and `pi05_full_droid_finetune` both set no freeze filter).
+        #   The recorded "training SigLIP collapsed the policy" failure had a different shape:
+        #   there SigLIP trained while the LLM was LoRA-only and effectively frozen, so vision
+        #   features drifted away from what a frozen language model expected. That was an
+        #   IMBALANCE failure. Here everything co-adapts, as upstream does.
+        # full_rank: freeze only SigLIP, so the kept blocks, final norms and action
+        #   projections train. Kept for the matched-comparison arm.
+        # otherwise: train LoRA adapters only.
+        freeze_filter=(
+            nnx.Nothing()
+            if freeze_nothing
+            else (nnx_utils.PathRegex(".*img.*") if full_rank else nnx.Not(nnx_utils.PathRegex(".*lora.*")))
+        ),
+        data=RLDSDroidDataConfig(
+            repo_id="droid",
+            rlds_data_dir="gs://gresearch/robotics",
+            action_space=droid_rlds_dataset.DroidActionSpace.JOINT_POSITION,
+            datasets=(
+                droid_rlds_dataset.RLDSDataset(
+                    name="droid",
+                    version="1.0.1",
+                    weight=1.0,
+                    filter_dict_path="gs://openpi-assets/droid/droid_sample_ranges_v1_0_1.json",
+                ),
+            ),
+            assets=AssetsConfig(
+                # Joint-POSITION norm stats. Velocity stats on position targets distort the
+                # flow loss, which was diagnosed as a cause of a timid policy.
+                assets_dir="gs://openpi-assets-simeval/pi05_droid_jointpos/assets",
+                asset_id="droid",
+            ),
+        ),
+        weight_loader=weight_loaders.LayerSubsetWeightLoader(
+            "gs://openpi-assets-simeval/pi05_droid_jointpos/params",
+            keep_layers=keep_layers,
+        ),
+        # `decay_steps=1_000_000` with `peak_lr == decay_lr == 5e-5` over a 20k-step run means
+        # the cosine decay never actually decays within this run -- after warmup, LR is just a
+        # constant 5e-5. Intentional (copied from `pi05_full_droid_finetune`), not a bug, but
+        # it reads like a decay schedule at a glance, so: it isn't one here.
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        fsdp_devices=fsdp_devices,
+        num_train_steps=num_train_steps,
+        batch_size=batch_size,
+        seed=42,
+        save_interval=save_interval,
+        # Default retains 5k/10k/15k/20k permanently so both arms can be read at matched
+        # steps. Checkpoints are ~16G each, so longer runs widen this rather than keep 20+.
+        keep_period=keep_period,
+        num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
+    )
+
+
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
     #
@@ -915,6 +1022,38 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_droid/params"),
         num_train_steps=20_000,
         batch_size=32,
+    ),
+    #
+    # Layer-truncation configs. See docs/superpowers/specs/2026-07-21-pi05-layer-truncation-design.md
+    #
+    _truncation_arm((0, 3, 7, 11, 14, 17)),
+    _truncation_arm(tuple(range(18))),
+    # Escalation after the LoRA arms scored 0/80: full-rank the kept blocks. See the
+    # docstring above for why this is the experiment that disambiguates depth from capacity.
+    # Held at batch 128 / 20k so it is matched to the LoRA arms -- that matching is what makes
+    # the depth-vs-capacity attribution clean.
+    _truncation_arm((0, 3, 7, 11, 14, 17), full_rank=True),
+    # Best-effort arm: stop matching the LoRA experiment and give the 6-layer model the best
+    # known recipe for full DROID. Mirrors `pi05_full_droid_finetune` exactly -- batch 256,
+    # 100k steps (~1 DROID epoch), nothing frozen, and its deliberately FLAT 5e-5 schedule
+    # (that config sets decay_lr == peak_lr on purpose; it is not a stale default).
+    #
+    # fsdp_devices=1 like upstream: at 1.75B params the whole model replicates comfortably on
+    # a 141G card, so sharding would buy memory we do not need and cost communication.
+    #
+    # Every earlier arm trained on ~10% of a DROID epoch (20k x 128 = 2.56M samples against
+    # upstream's 100k x 256 = 25.6M). Those runs were data-starved as well as low-capacity,
+    # which is why this arm -- not the matched ones -- is the real test of whether 6 layers work.
+    _truncation_arm(
+        (0, 3, 7, 11, 14, 17),
+        full_rank=True,
+        freeze_nothing=True,
+        batch_size=256,
+        num_train_steps=100_000,
+        fsdp_devices=1,
+        save_interval=5_000,
+        keep_period=20_000,
+        name_suffix="_100k",
     ),
     #
     # ALOHA Sim configs. This config is used to demonstrate how to train on a simple simulated environment.

@@ -306,6 +306,40 @@ The run was allowed to continue only because a cheap 20k-checkpoint eval was run
 acting on the recommendation. Lesson: at 10% of an epoch, a 0% RoboLab score is not evidence
 of a capability ceiling.
 
+### 40k checkpoint: recovery stalls at ~10% (2026-07-23)
+
+| task | 10k (2.56M) | 20k (5.12M) | 40k (10.24M) | 18L ctrl (2.56M) |
+|---|---|---|---|---|
+| BananaInBowl | 0% | 44% | 25% | 94% |
+| MustardInRightBin | 0% | 6% | 25% | 12% |
+| BowlInBin | 0% | 0% | **0%** | 56% |
+| MarkerInMug | 0% | 0% | **0%** | 12% |
+| BagelsOnPlate | 0% | 0% | 0% | 0% |
+| **OVERALL** | **0/80 = 0%** | **8/80 = 10%** | **8/80 = 10%** | **28/80 = 35%** |
+
+**The aggregate is flat from 20k to 40k (both 10%), despite doubling the data again (5.12M ->
+10.24M).** The 0% -> 10% jump between 10k and 20k was real; the curve then stalls.
+
+Read the per-task detail, not the aggregate:
+- Only the two EASIEST tasks (Banana and Mustard, control 94%/12%) ever leave zero. They
+  trade places between 20k and 40k -- Banana 44->25, Mustard 6->25 -- but at n=16 those swings
+  are within noise (Wilson 95% CIs on 25% and 44% overlap heavily). Do not read a trend into
+  either single number.
+- **BowlInBin and MarkerInMug are 0/16 at every checkpoint** (control 56%/12%). Four data
+  doublings have not moved them off zero. This is the signal: the harder tasks are NOT
+  following Banana's recovery, which argues against a pure data-scaling story and for a
+  per-task capability that 6 layers has not reached.
+
+So the corrected picture after three checkpoints: data-starvation explained the 10k 0/80,
+but data scaling alone plateaus the 6-layer model around 10% -- roughly a third of the
+control's 35% -- with competence confined to the easiest one or two tasks. Whether the
+remaining 60k steps (up to 25.6M) break BowlInBin/Marker off zero is the open question; the
+40k result makes a large further gain look unlikely but not excluded.
+
+Statistical honesty: every cell is n=16 (Wilson 95% CI on a single task spans ~20 points),
+and the 20k vs 40k aggregates (both 10%, CI [5-19]%) are statistically indistinguishable.
+Treat per-checkpoint task numbers as directional, not precise.
+
 ## 5. Report
 
 Two deltas, both stated explicitly:

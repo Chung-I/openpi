@@ -243,9 +243,17 @@ def create_data_loader(
     logging.info(f"data_config: {data_config}")
 
     if data_config.rlds_data_dir is not None:
+        # VLASH: rlds_action_horizon overrides the window requested from the RLDS loader (e.g.
+        # action_horizon + delta_max, so VlashTemporalOffset has extra future steps to sample
+        # an offset from). None means "use the model's action_horizon", as before.
+        rlds_action_horizon = (
+            data_config.rlds_action_horizon
+            if data_config.rlds_action_horizon is not None
+            else config.model.action_horizon
+        )
         return create_rlds_data_loader(
             data_config,
-            action_horizon=config.model.action_horizon,
+            action_horizon=rlds_action_horizon,
             batch_size=config.batch_size,
             sharding=sharding,
             shuffle=shuffle,

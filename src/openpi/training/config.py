@@ -28,6 +28,7 @@ import openpi.training.misc.roboarena_config as roboarena_config
 import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
+import openpi.transforms_vlash as transforms_vlash
 
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
@@ -96,6 +97,12 @@ class DataConfig:
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
     # List of datasets to sample from: name, version, weight, and optionally filter_dict_path
     datasets: Sequence[droid_rlds_dataset.RLDSDataset] = ()
+    # Overrides the action-chunk window length requested from the RLDS loader. None (default)
+    # means use the model's action_horizon, as before. VLASH sets this to
+    # action_horizon + delta_max so VlashTemporalOffset has extra future steps to sample a
+    # temporal offset from, then slices back down to action_horizon in the data transform
+    # chain -- see RLDSDroidDataConfig.vlash_delta_max.
+    rlds_action_horizon: int | None = None
 
 
 class GroupFactory(Protocol):
@@ -132,6 +139,10 @@ class ModelTransformFactory(GroupFactory):
                         _transforms.TokenizePrompt(
                             _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
                             discrete_state_input=model_config.discrete_state_input,
+                            # VLASH: when state_cond is on, state reaches the model via AdaRMS
+                            # conditioning, so the prompt should use the pi05_no_state format
+                            # rather than duplicating state as a discrete token section.
+                            pi05_no_state=model_config.state_cond,
                         ),
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
@@ -378,6 +389,16 @@ class RLDSDroidDataConfig(DataConfigFactory):
         ),
     )
 
+    # VLASH: when set, requests an RLDS action window `action_horizon + vlash_delta_max` steps
+    # long (instead of just `action_horizon`) and inserts `transforms_vlash.VlashTemporalOffset`
+    # into the data transform chain right after `DeltaActions`, which samples a random offset
+    # in [0, vlash_delta_max] and slices the window back down to `action_horizon`. None
+    # (default) preserves stock behavior -- unrelated configs using this factory (e.g.
+    # `pi0_fast_full_droid_finetune`, `pi05_full_droid_finetune`) are unaffected. Only valid
+    # together with `action_space == JOINT_POSITION`, since VlashTemporalOffset assumes
+    # dims 0..6 are already delta-encoded and dim 7 is the absolute gripper command.
+    vlash_delta_max: int | None = None
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         repack_transform = _transforms.Group(
@@ -407,10 +428,23 @@ class RLDSDroidDataConfig(DataConfigFactory):
                 inputs=[_transforms.DeltaActions(delta_action_mask)],
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
             )
+            if self.vlash_delta_max is not None:
+                data_transforms = data_transforms.push(
+                    inputs=[
+                        transforms_vlash.VlashTemporalOffset(
+                            delta_max=self.vlash_delta_max,
+                            action_horizon=model_config.action_horizon,
+                        )
+                    ],
+                )
+        elif self.vlash_delta_max is not None:
+            raise ValueError("vlash_delta_max requires action_space == DroidActionSpace.JOINT_POSITION.")
 
         model_transforms = ModelTransformFactory()(model_config)
 
         assert self.rlds_data_dir is not None, "Need to set rlds data dir for RLDS data loader."
+
+        rlds_action_horizon = model_config.action_horizon + (self.vlash_delta_max or 0)
 
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
@@ -420,6 +454,7 @@ class RLDSDroidDataConfig(DataConfigFactory):
             rlds_data_dir=self.rlds_data_dir,
             action_space=self.action_space,
             datasets=self.datasets,
+            rlds_action_horizon=rlds_action_horizon,
         )
 
 
@@ -639,6 +674,64 @@ _CONFIGS = [
                 prompt_from_task=True,
             ),
         ),
+    ),
+    #
+    # VLASH-on-DROID configs.
+    #
+    TrainConfig(
+        name="pi05_droid_jointpos_vlash",
+        project_name="vlash-droid",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=15,
+            # AdaRMS state conditioning (Task 1): state reaches the model through a fresh
+            # state_proj/state_mlp_in/state_mlp_out tower instead of the discrete prompt.
+            state_cond=True,
+            discrete_state_input=False,
+        ),
+        data=RLDSDroidDataConfig(
+            repo_id="droid",
+            rlds_data_dir="gs://gresearch/robotics",
+            action_space=droid_rlds_dataset.DroidActionSpace.JOINT_POSITION,
+            # Temporal-offset augmentation (Task 2): samples delta in [0, 3] and rolls the
+            # action window/state forward by delta steps. Requires 3 extra RLDS steps of
+            # lookahead -- see DataConfig.rlds_action_horizon (18 = 15 + 3 here).
+            vlash_delta_max=3,
+            datasets=(
+                droid_rlds_dataset.RLDSDataset(
+                    name="droid",
+                    version="1.0.1",
+                    weight=1.0,
+                    filter_dict_path="gs://openpi-assets/droid/droid_sample_ranges_v1_0_1.json",
+                ),
+            ),
+            assets=AssetsConfig(
+                # Joint-POSITION norm stats -- velocity stats on position targets distort the
+                # flow loss (see pi05_droid_jointpos_trunc* on chungyi/pi05-layer-truncation).
+                # Pointed at the local nano4 checkpoint (has both assets/ and params/) rather
+                # than a GCS asset location, so norm-stat loading doesn't depend on GCS egress.
+                assets_dir="/work/roboleon1295/checkpoints/pi05_droid_jointpos/assets",
+                asset_id="droid",
+            ),
+        ),
+        # Released pi05_droid_jointpos params, restored locally on nano4. This checkpoint
+        # predates state_cond, so state_proj/state_mlp_in/state_mlp_out (the three fresh AdaRMS
+        # state modules from Task 1) are missing from it and are merged in from the freshly
+        # initialized model instead -- see weight_loaders.CheckpointWeightLoader.missing_regex.
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/work/roboleon1295/checkpoints/pi05_droid_jointpos/params",
+            missing_regex=r"(state_proj|state_mlp_in|state_mlp_out)/.*",
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        num_train_steps=20_000,
+        batch_size=32,
+        num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
     ),
     #
     # Fine-tuning Libero configs.

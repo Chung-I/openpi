@@ -14,12 +14,32 @@ See `apply_offset` for the pure, testable core and `VlashTemporalOffset` for the
 `transforms.DataTransformFn`-compatible wrapper that samples `delta` and applies it.
 """
 
+import collections
 import dataclasses
+import logging
 
 import numpy as np
 
 from openpi.transforms import DataDict
 from openpi.transforms import DataTransformFn
+
+# Task 3 repro-gate debug aid ONLY: prints a histogram of the first `_OFFSET_LOG_SAMPLE_SIZE`
+# offsets sampled per process, then goes silent for the rest of the run. Purely diagnostic --
+# does not affect the sampled `delta` or any training behavior. Safe to delete this block and
+# its call site in `VlashTemporalOffset.__call__` with no effect on correctness.
+_OFFSET_LOG_SAMPLE_SIZE = 32
+_offset_log_samples: list[int] = []
+_offset_log_state = {"done": False}
+
+
+def _log_first_batch_offsets(delta: int) -> None:
+    if _offset_log_state["done"]:
+        return
+    _offset_log_samples.append(delta)
+    if len(_offset_log_samples) >= _OFFSET_LOG_SAMPLE_SIZE:
+        histogram = dict(sorted(collections.Counter(_offset_log_samples).items()))
+        logging.info(f"[vlash] first {len(_offset_log_samples)} sampled vlash_offset values: {histogram}")
+        _offset_log_state["done"] = True
 
 
 def apply_offset(sample: DataDict, *, delta: int, action_horizon: int) -> DataDict:
@@ -79,6 +99,7 @@ class VlashTemporalOffset(DataTransformFn):
     def __call__(self, data: DataDict) -> DataDict:
         rng = np.random.default_rng()
         delta = int(rng.integers(0, self.delta_max + 1))
+        _log_first_batch_offsets(delta)
         data = apply_offset(data, delta=delta, action_horizon=self.action_horizon)
         if self.rng_key != "vlash_offset":
             data[self.rng_key] = data.pop("vlash_offset")

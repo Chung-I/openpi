@@ -248,6 +248,12 @@ class AbsoluteActions(DataTransformFn):
 class TokenizePrompt(DataTransformFn):
     tokenizer: _tokenizer.PaligemmaTokenizer
     discrete_state_input: bool = False
+    # VLASH: pi05 prompt format ("Task: ...;\nAction: ") with no "State: ..." section, for
+    # configs where state reaches the model via AdaRMS conditioning (Pi0Config.state_cond)
+    # instead of the discrete prompt. Only takes effect when discrete_state_input is False
+    # (state is None), since an explicit discrete state section always takes priority --
+    # see PaligemmaTokenizer.tokenize.
+    pi05_no_state: bool = False
 
     def __call__(self, data: DataDict) -> DataDict:
         if (prompt := data.pop("prompt", None)) is None:
@@ -262,7 +268,7 @@ class TokenizePrompt(DataTransformFn):
         if not isinstance(prompt, str):
             prompt = prompt.item()
 
-        tokens, token_masks = self.tokenizer.tokenize(prompt, state)
+        tokens, token_masks = self.tokenizer.tokenize(prompt, state, pi05_no_state=self.pi05_no_state)
         return {**data, "tokenized_prompt": tokens, "tokenized_prompt_mask": token_masks}
 
 

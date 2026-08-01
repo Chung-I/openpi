@@ -47,11 +47,20 @@ class CheckpointWeightLoader(WeightLoader):
 
     params_path: str
 
+    # Regex (fullmatch, over "/"-joined flattened param paths) selecting reference-model keys
+    # that are allowed to be missing from the checkpoint being loaded; those keys are merged in
+    # from the freshly-initialized model instead of failing. Defaults to LoRA adapters, which
+    # are absent from a non-LoRA base checkpoint when fine-tuning with LoRA. VLASH's
+    # state-conditioning configs (Pi0Config.state_cond) override this to also cover the three
+    # fresh AdaRMS state modules (state_proj/state_mlp_in/state_mlp_out) added in Task 1, which
+    # the released pi05_droid_jointpos checkpoint predates and therefore does not contain.
+    missing_regex: str = ".*lora.*"
+
     def load(self, params: at.Params) -> at.Params:
         # We are loading np.ndarray and relying on the training code to properly convert and shard the params.
         loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
-        # Add all missing LoRA weights.
-        return _merge_params(loaded_params, params, missing_regex=".*lora.*")
+        # Add all missing weights matched by `missing_regex`.
+        return _merge_params(loaded_params, params, missing_regex=self.missing_regex)
 
 
 @dataclasses.dataclass(frozen=True)

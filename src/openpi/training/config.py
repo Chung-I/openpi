@@ -103,6 +103,13 @@ class DataConfig:
     # temporal offset from, then slices back down to action_horizon in the data transform
     # chain -- see RLDSDroidDataConfig.vlash_delta_max.
     rlds_action_horizon: int | None = None
+    # Overrides DroidRldsDataset's shuffle buffer size (default 250_000 timesteps, ~75GB of
+    # images -- see droid_rlds_dataset.DroidRldsDataset). None means use that default. A quick
+    # smoke-test run only needs a handful of batches and can pass a small value here (e.g. via
+    # `--data.shuffle-buffer-size=2000` on the CLI) to avoid OOM on a single-GPU job with a
+    # modest --mem allocation; production training should leave this at None for real shuffling
+    # entropy. See docs/superpowers/plans/2026-08-01-vlash-droid-notes.md (Task 3 section).
+    shuffle_buffer_size: int | None = None
 
 
 class GroupFactory(Protocol):
@@ -374,6 +381,9 @@ class RLDSDroidDataConfig(DataConfigFactory):
 
     rlds_data_dir: str | None = None
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
+    # See DataConfig.shuffle_buffer_size. Overridable on the CLI via
+    # `--data.shuffle-buffer-size=<n>` for e.g. a quick smoke test.
+    shuffle_buffer_size: int | None = None
 
     # Filtering options. Can pass a path to a dictionary that maps episodes to timestep ranges
     # to tuples denoting ranges of time steps to keep (start, end). Episodes are uniquely identified with
@@ -455,6 +465,7 @@ class RLDSDroidDataConfig(DataConfigFactory):
             action_space=self.action_space,
             datasets=self.datasets,
             rlds_action_horizon=rlds_action_horizon,
+            shuffle_buffer_size=self.shuffle_buffer_size,
         )
 
 

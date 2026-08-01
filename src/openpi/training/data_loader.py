@@ -175,6 +175,9 @@ def create_rlds_dataset(
     shuffle: bool = False,
 ) -> Dataset:
     # At the moment, we only support DROID for RLDS datasets.
+    kwargs = {}
+    if data_config.shuffle_buffer_size is not None:
+        kwargs["shuffle_buffer_size"] = data_config.shuffle_buffer_size
     return DroidRldsDataset(
         data_dir=data_config.rlds_data_dir,
         batch_size=batch_size,
@@ -182,6 +185,7 @@ def create_rlds_dataset(
         action_chunk_size=action_horizon,
         action_space=data_config.action_space,
         datasets=data_config.datasets,
+        **kwargs,
     )
 
 

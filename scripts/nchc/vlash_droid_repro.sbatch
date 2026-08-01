@@ -57,13 +57,17 @@ export GCS_CA_BUNDLE="$CA_BUNDLE"
 mkdir -p logs
 
 # --- 12-step repro of pi05_droid_jointpos_vlash: config + RLDS window + offset transform. ---
-# --no-enable-async-checkpointing: on this single-GPU job, orbax's async
-# device-to-host-transfer + background save was observed to hang indefinitely at step 6's
-# checkpoint save (zero bytes written, zero GPU util, main thread stuck on a futex, for 10+
-# minutes) -- see docs/superpowers/plans/2026-08-01-vlash-droid-notes.md (Task 3 section).
-# Async checkpointing matters for throughput on real multi-GPU production runs; this repro is a
-# single GPU / 12-step smoke test, so paying for a synchronous (slower but reliable) save here
-# is the right tradeoff. Re-evaluate this flag when moving to the real multi-GPU training job.
+# --data.shuffle-buffer-size=5000: root-cause fix for an earlier OOM (job 228165, killed by
+# Slurm's oom_kill at the step-6 checkpoint save). DroidRldsDataset's default shuffle buffer
+# holds 250_000 timesteps of two 224x224x3 images each (~75GB) -- fine for real training's
+# --mem=1200G 8-GPU allocations (see train_truncation.sbatch), but this 12-step smoke test only
+# ever needs a few dozen examples, so a small buffer avoids that cost entirely within the
+# dev-partition single-GPU fair-use envelope (<=200G).
+# --no-enable-async-checkpointing: keeps checkpoint-save host memory bounded to one copy of the
+# train_state pytree instead of double-buffering for a background thread while training
+# continues -- cheap insurance on top of the shuffle-buffer fix above, at the cost of a slower
+# (synchronous) save; re-evaluate both flags for the real multi-GPU training job, where async
+# checkpointing matters for throughput and the large --mem allocation covers the shuffle buffer.
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.8 uv run --no-sync python scripts/train.py pi05_droid_jointpos_vlash \
   --exp-name=vlash_repro \
   --overwrite \
@@ -72,7 +76,8 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.8 uv run --no-sync python scripts/train.py pi05
   --log-interval=1 \
   --save-interval=6 \
   --no-wandb-enabled \
-  --no-enable-async-checkpointing
+  --no-enable-async-checkpointing \
+  --data.shuffle-buffer-size=5000
 EXIT_CODE=$?
 
 echo "TRAIN_EXIT=$EXIT_CODE"

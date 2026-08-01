@@ -68,6 +68,16 @@ def test_rlds_window_is_18():
     assert config.model.action_horizon == 15
 
 
+def test_shuffle_buffer_size_defaults_to_none():
+    """Production default (DroidRldsDataset's own 250_000) unless overridden, e.g. via
+    --data.shuffle-buffer-size=<n> for a quick smoke test that doesn't need full shuffling
+    entropy and would otherwise risk OOM on a modest single-GPU --mem allocation."""
+    config = _config.get_config(CONFIG_NAME)
+    assert config.data.shuffle_buffer_size is None
+    data_config = config.data.create(config.assets_dirs, config.model)
+    assert data_config.shuffle_buffer_size is None
+
+
 def test_offset_transform_present_after_delta_actions():
     config = _config.get_config(CONFIG_NAME)
     data_config = config.data.create(config.assets_dirs, config.model)

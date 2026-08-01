@@ -14,7 +14,9 @@ import pytest
 
 from openpi.models import pi0
 from openpi.models import pi0_config
+import openpi.training.config as _config
 from openpi.training.vlash_eval import PerOffsetValLoss
+from openpi.training.vlash_eval import _fixed_delta_config
 
 BATCH = 2
 HORIZON = 2
@@ -67,3 +69,24 @@ def test_compute_is_deterministic_across_calls(val_hook, model):
     first = val_hook.compute(model)
     second = val_hook.compute(model)
     assert first == second
+
+
+# ---------------------------------------------------------------------------------------------
+# Regression: `_fixed_delta_config` must not trip the data/model `vlash_shared_obs` agreement
+# check for a SHARED-obs training arm. Caught live by the Task 7 equivalence-gate job
+# (pi05_droid_jointpos_vlash_shared crashed at startup with "vlash_shared_obs mismatch:
+# data-side=False, model-side=True") before the fix below (also override the fixed-delta
+# config's MODEL side, not just its data side).
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("config_name", ["pi05_droid_jointpos_vlash", "pi05_droid_jointpos_vlash_shared"])
+def test_fixed_delta_config_data_model_agree(config_name):
+    config = _config.get_config(config_name)
+    for delta in range(config.data.vlash_delta_max + 1):
+        fixed_config = _fixed_delta_config(config, delta=delta, eval_batch_size=8)
+        assert fixed_config.model.vlash_shared_obs is False
+        assert fixed_config.data.vlash_shared_obs is False
+        # Must not raise: this is exactly where the mismatch ValueError fired.
+        data_config = fixed_config.data.create(fixed_config.assets_dirs, fixed_config.model)
+        assert data_config.rlds_action_horizon == config.model.action_horizon + config.data.vlash_delta_max

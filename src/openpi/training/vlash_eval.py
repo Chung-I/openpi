@@ -45,6 +45,41 @@ logger = logging.getLogger("openpi")
 _EVAL_RNG = jax.random.key(0xDEAD_5EED)
 
 
+def _fixed_delta_config(config: _config.TrainConfig, *, delta: int, eval_batch_size: int) -> _config.TrainConfig:
+    """Builds a throwaway single-delta TrainConfig for caching one held-out batch.
+
+    Factored out of `PerOffsetValLoss.build` so it's unit-testable without a real RLDS/GCS data
+    loader (`config.data.create(...)` alone touches no network) -- this exact construction
+    caused a real bug once: for a shared-obs arm (`config.model.vlash_shared_obs=True`), forcing
+    `vlash_shared_obs=False` on the DATA side only (without also overriding the MODEL side) trips
+    `RLDSDroidDataConfig.create()`'s data/model agreement check
+    (`ValueError: vlash_shared_obs mismatch`), caught by the Task 7 equivalence-gate job.
+    """
+    data_cfg = config.data
+    if not isinstance(data_cfg, _config.RLDSDroidDataConfig) or data_cfg.vlash_delta_max is None:
+        raise ValueError(
+            "PerOffsetValLoss requires an RLDSDroidDataConfig with vlash_delta_max set "
+            f"(got {type(data_cfg).__name__}, vlash_delta_max={getattr(data_cfg, 'vlash_delta_max', None)})."
+        )
+    # If `config.model` is a shared-obs arm, the fixed-delta batch is deliberately single-branch
+    # (one delta, no `vlash_states`) -- build a matching single-branch copy of the MODEL config
+    # too, purely for `RLDSDroidDataConfig.create()`'s data/model agreement check and so
+    # `ModelTransformFactory` does not append `SplitVlashBranches`. This does NOT affect the
+    # actual training model (only `config.model`, a separate object, is ever merged with
+    # `train_state.params` in scripts/train.py).
+    fixed_model_cfg = dataclasses.replace(config.model, vlash_shared_obs=False)
+    fixed_data_cfg = dataclasses.replace(
+        data_cfg,
+        vlash_fixed_delta=delta,
+        vlash_shared_obs=False,
+        # We only ever pull ONE batch then cache it for the life of the run, so a small
+        # dedicated buffer avoids paying the full 250k-timestep (~75GB) shuffle buffer cost
+        # just to draw one held-out batch.
+        shuffle_buffer_size=min(data_cfg.shuffle_buffer_size or 50_000, 2_000),
+    )
+    return dataclasses.replace(config, batch_size=eval_batch_size, model=fixed_model_cfg, data=fixed_data_cfg)
+
+
 @dataclasses.dataclass
 class PerOffsetValLoss:
     """Caches one held-out (observation, actions) batch per fixed temporal offset."""
@@ -77,16 +112,7 @@ class PerOffsetValLoss:
 
         batches: dict[int, tuple[_model.Observation, _model.Actions]] = {}
         for delta in resolved_deltas:
-            fixed_data_cfg = dataclasses.replace(
-                data_cfg,
-                vlash_fixed_delta=delta,
-                vlash_shared_obs=False,
-                # We only ever pull ONE batch then cache it for the life of the run, so a
-                # small dedicated buffer avoids paying the full 250k-timestep (~75GB) shuffle
-                # buffer cost just to draw one held-out batch.
-                shuffle_buffer_size=min(data_cfg.shuffle_buffer_size or 50_000, 2_000),
-            )
-            fixed_config = dataclasses.replace(config, batch_size=eval_batch_size, data=fixed_data_cfg)
+            fixed_config = _fixed_delta_config(config, delta=delta, eval_batch_size=eval_batch_size)
             loader = _data_loader.create_data_loader(fixed_config, sharding=sharding, shuffle=True, num_batches=1)
             (batches[delta],) = list(loader)
             logger.info(f"[vlash-val] cached held-out batch for delta={delta}")

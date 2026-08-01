@@ -57,6 +57,13 @@ export GCS_CA_BUNDLE="$CA_BUNDLE"
 mkdir -p logs
 
 # --- 12-step repro of pi05_droid_jointpos_vlash: config + RLDS window + offset transform. ---
+# --no-enable-async-checkpointing: on this single-GPU job, orbax's async
+# device-to-host-transfer + background save was observed to hang indefinitely at step 6's
+# checkpoint save (zero bytes written, zero GPU util, main thread stuck on a futex, for 10+
+# minutes) -- see docs/superpowers/plans/2026-08-01-vlash-droid-notes.md (Task 3 section).
+# Async checkpointing matters for throughput on real multi-GPU production runs; this repro is a
+# single GPU / 12-step smoke test, so paying for a synchronous (slower but reliable) save here
+# is the right tradeoff. Re-evaluate this flag when moving to the real multi-GPU training job.
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.8 uv run --no-sync python scripts/train.py pi05_droid_jointpos_vlash \
   --exp-name=vlash_repro \
   --overwrite \
@@ -64,7 +71,8 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.8 uv run --no-sync python scripts/train.py pi05
   --num-train-steps=12 \
   --log-interval=1 \
   --save-interval=6 \
-  --no-wandb-enabled
+  --no-wandb-enabled \
+  --no-enable-async-checkpointing
 EXIT_CODE=$?
 
 echo "TRAIN_EXIT=$EXIT_CODE"

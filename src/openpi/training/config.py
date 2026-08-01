@@ -560,6 +560,14 @@ class TrainConfig:
     # If true, will enable wandb logging.
     wandb_enabled: bool = True
 
+    # If true, checkpoint saves happen on a background thread (orbax async checkpointing).
+    # Default True (matches prior behavior / upstream throughput on multi-GPU runs). Exposed as
+    # a CLI-overridable escape hatch: on a single-GPU job, the async device-to-host transfer +
+    # background save was observed to hang indefinitely (VLASH-on-DROID Task 3 repro, see
+    # docs/superpowers/plans/2026-08-01-vlash-droid-notes.md) -- pass
+    # --no-enable-async-checkpointing to fall back to a slower but reliable synchronous save.
+    enable_async_checkpointing: bool = True
+
     # Used to pass metadata to the policy server.
     policy_metadata: dict[str, Any] | None = None
 

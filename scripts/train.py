@@ -214,6 +214,7 @@ def main(config: _config.TrainConfig):
         keep_period=config.keep_period,
         overwrite=config.overwrite,
         resume=config.resume,
+        enable_async_checkpointing=config.enable_async_checkpointing,
     )
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
 

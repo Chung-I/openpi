@@ -48,7 +48,7 @@ New `TrainConfig` **`pi05_droid_jointpos_vlash`**, derived from the truncation w
 
 New runner in `~/Codes/RoboLab/policies/pi0_family/` embedding the delay-emulating chunk executor semantics proven in the LIBERO reproduction (chunk starting at sim step T was requested with obs from T−Δ; per-episode fresh executor).
 
-**Arms (5) × tasks (2 — `rolling_ball_in_bowl_task`, `static_ball_in_bowl_task`):**
+**Arms (5) × tasks (3 — `rolling_ball_in_bowl_task`, `static_ball_in_bowl_task`, `banana_in_bowl_task`):**
 
 | Arm | Model | Obs at request | State input |
 |---|---|---|---|
@@ -57,7 +57,7 @@ New runner in `~/Codes/RoboLab/policies/pi0_family/` embedding the delay-emulati
 | VLASH-async Δ=1, Δ=2 | VLASH finetune | stale (T−Δ) | **rolled forward** = last commanded action (exact for jointpos), via AdaRMS |
 
 - Δ values confirmed against measured end-to-end latency before the sweep (expected ~1–2 steps at 15 Hz).
-- 50 trials/arm/task = 500 episodes total; success via the tasks' built-in conditionals; per-episode incremental results JSON (resume-capable, as in LIBERO).
+- 50 trials/arm/task = 750 episodes total; success via the tasks' built-in conditionals; per-episode incremental results JSON (resume-capable, as in LIBERO).
 - Predicted outcome: static ≈ parity everywhere; rolling: VLASH ≫ naive-async, ≈ sync or better.
 
 ## Success criteria

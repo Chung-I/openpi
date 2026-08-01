@@ -275,7 +275,7 @@ def test_transform_samples_in_range():
 
 ### Task 10: Full sweeps
 
-- [ ] 5 arms × 2 tasks × 50 trials, resumable per-episode JSONs under `~/Codes/RoboLab/output/vlash_arms/`. Run arms sequentially (one server checkpoint at a time: released for sync+naive, finetune for vlash arms). Monitor + spot-check early success rates per arm.
+- [ ] 5 arms × 3 tasks × 50 trials, resumable per-episode JSONs under `~/Codes/RoboLab/output/vlash_arms/`. Run arms sequentially (one server checkpoint at a time: released for sync+naive, finetune for vlash arms). Monitor + spot-check early success rates per arm.
 
 ---
 

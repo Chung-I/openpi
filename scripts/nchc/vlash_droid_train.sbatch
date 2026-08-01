@@ -110,6 +110,18 @@ echo "HEADLINE RUN: config=$CONFIG batch_size=$BATCH_SIZE exp_name=$EXP_NAME"
 #
 # shuffle-buffer-size and enable-async-checkpointing are deliberately left at their config
 # defaults (250_000 / True) -- see the #SBATCH --mem comment above for why that's safe here.
+#
+# --fsdp-devices=4: added after job 228648 (first real attempt on 4 GPUs) crashed in
+# init_train_state with `RESOURCE_EXHAUSTED: Out of memory while trying to allocate
+# 2106589184 bytes` on GPU_0's allocator. Root cause: TrainConfig.fsdp_devices defaults to 1
+# (no FSDP), so sharding.fsdp_sharding replicates the ENTIRE train_state (params + Adam
+# mu/nu + EMA copy -- this is a full finetune, no freeze_filter, so ALL ~2.3B params carry
+# full optimizer state) onto EVERY GPU instead of splitting it -- 4x more per-GPU memory than
+# necessary for a 4-GPU job. sharding.DATA_AXIS = (BATCH_AXIS, FSDP_AXIS) means the batch is
+# always split across all devices regardless of this flag (per-GPU batch stays 2 either way);
+# --fsdp-devices=4 only changes whether the MODEL/optimizer state is also sharded across those
+# same 4 GPUs (mesh shape (1, 4) instead of (4, 1)), cutting large-tensor per-GPU memory by
+# ~4x at the cost of an extra all-gather before each op that touches a sharded param.
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.8 uv run --no-sync python scripts/train.py "$CONFIG" \
   --exp-name="$EXP_NAME" \
   --overwrite \
@@ -117,7 +129,8 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.8 uv run --no-sync python scripts/train.py "$CO
   --num-train-steps=30000 \
   --log-interval=100 \
   --save-interval=1000 \
-  --keep-period=40000
+  --keep-period=40000 \
+  --fsdp-devices=4
 EXIT_CODE=$?
 
 echo "TRAIN_EXIT=$EXIT_CODE"

@@ -214,3 +214,153 @@ streaming is how upstream openpi itself trains on DROID).
   fixture (unsorted single-line import, `N803` on the `H` parameter name) — left as-is since
   the brief specifies the fixture verbatim and this repo's `.pre-commit-config.yaml` is not
   installed as a git hook here, so it does not block the commit.
+
+## Task 3 — Training config, RLDS window extension, 12-step repro
+
+**Status: PASSED.** Config `pi05_droid_jointpos_vlash` added, RLDS window mechanism found and
+extended, 12-step repro (Slurm job **228203** on nano4) completed cleanly: `sacct` shows
+`COMPLETED 0:0`, `TRAIN_EXIT=0`.
+
+- **RLDS window mechanism** (how `action_horizon` reaches the RLDS loader): `data_loader.
+  create_data_loader` hardcoded `action_horizon=config.model.action_horizon` for the RLDS
+  branch, which flows into `create_rlds_data_loader` → `create_rlds_dataset` →
+  `DroidRldsDataset(..., action_chunk_size=action_horizon)` (`droid_rlds_dataset.py`'s
+  `chunk_actions` uses it to build the `[traj_len, action_chunk_size]` gather-index tensor).
+  Added `DataConfig.rlds_action_horizon: int | None` (defaults `None` = old behavior) and
+  `RLDSDroidDataConfig.vlash_delta_max: int | None` (the factory-level knob); when set, `.create()`
+  computes `rlds_action_horizon = model_config.action_horizon + vlash_delta_max` (15+3=18) and
+  inserts `transforms_vlash.VlashTemporalOffset(delta_max=3, action_horizon=15)` into
+  `data_transforms` right after `DeltaActions`. `data_loader.create_data_loader` reads
+  `data_config.rlds_action_horizon` (falling back to `config.model.action_horizon`) so only
+  this config's window is extended; every other `RLDSDroidDataConfig` user
+  (`pi0_fast_full_droid_finetune`, `pi05_full_droid_finetune`) is unaffected (`vlash_delta_max`
+  defaults `None`).
+- **Tokenizer wiring**: `ModelTransformFactory`'s `PI05` branch now passes
+  `pi05_no_state=model_config.state_cond` into `_transforms.TokenizePrompt`, and `TokenizePrompt`
+  forwards it to `tokenizer.tokenize(..., pi05_no_state=...)`. Confirmed in the real job's
+  `data_config` log line: `TokenizePrompt(..., discrete_state_input=False, pi05_no_state=True)`.
+- **Weight loader**: `CheckpointWeightLoader` gained a `missing_regex` field (was hardcoded
+  `.*lora.*`); `pi05_droid_jointpos_vlash` uses
+  `missing_regex=r"(state_proj|state_mlp_in|state_mlp_out)/.*"` against the local checkpoint
+  `/work/roboleon1295/checkpoints/pi05_droid_jointpos/params`. Confirmed via the job's full
+  param listing (`train.py:238`): `state_proj`/`state_mlp_in`/`state_mlp_out` present with
+  freshly-initialized shapes (`state_proj.kernel: (32, 1024)`), everything else restored.
+- **Pi0Config assertion** (Task 1 review follow-up): `__post_init__` now raises `ValueError` if
+  `state_cond=True` and `pi05=False`. Covered by `config_test.py::test_state_cond_requires_pi05`.
+- **`__post_init__` for the new config**: `pi05_droid_jointpos_vlash` explicitly sets
+  `discrete_state_input=False` (needed so `TokenizePrompt` passes `state=None` into
+  `tokenizer.tokenize`, which is required for the `pi05_no_state` branch to trigger — see
+  `tokenizer.py`'s `if state is not None: ... elif pi05_no_state: ...` priority order).
+- **Config test**: `src/openpi/training/config_test.py` (new file — did not exist on this
+  branch before Task 3) — 11 tests, all pass locally and on nano4's venv. Per the brief's
+  correction: the truncation branch's `pi05_droid_jointpos` is not a standalone `TrainConfig`
+  (only exists inline inside `_truncation_arm`), so instead of comparing against it directly,
+  `test_data_is_rlds_jointpos_matching_truncation_branch_recipe` documents exactly what's
+  ported verbatim (`rlds_data_dir`, `action_space`, filter path, `num_workers=0`) vs.
+  deliberately different (local nano4 `assets_dir`/`params_path` instead of GCS), and
+  `test_upstream_pi05_droid_is_untouched` guards the pre-existing `pi05_droid` config.
+
+### Debug loop — 3 root-caused bugs found and fixed on the real repro job
+
+All were genuine bugs (or a genuine resource-sizing miss), not flukes — verified by rerunning
+after each fix and observing progress past the previous failure point.
+
+1. **Read-only array in `DeltaActions`** (job 228096). `IterableTransformedDataset.__iter__`
+   split a batched RLDS sample into per-example views via bare numpy indexing (`x[i]`), which
+   inherits the parent array's writeable flag. `EagerTensor.numpy()` batches coming out of the
+   tf.data/dlimp pipeline can be read-only (TF avoids copying its internal buffer), and
+   `DeltaActions` mutates `actions` in place (`actions[..., :dims] -= ...`), which raised
+   `ValueError: output array is read-only`. **This is a general RLDS-pipeline bug, not
+   vlash-specific** — it would affect any RLDS+jointpos config using `DeltaActions`, but nothing
+   in this repo's existing RLDS configs had apparently been run against this exact TF version
+   until now. Fixed in `data_loader.py`.
+2. **Over-eager fix #1 broke prompt decoding** (job 228124). The first fix
+   (`np.array(x[i])` unconditionally) also wrapped scalar bytes/str leaves (`"prompt"`) into a
+   0-d ndarray. `droid_policy.DroidInputs` decodes prompt via `isinstance(data["prompt"], bytes)`,
+   which a 0-d ndarray never satisfies (even though the raw `numpy.bytes_`/`bytes` it wrapped
+   would have), so the decode step silently no-opped and `PaligemmaTokenizer.tokenize()` got a
+   raw `bytes` object, crashing on `.replace("_", " ")` with `TypeError: a bytes-like object is
+   required, not 'str'`. Fixed by only copying when the per-sample leaf is itself an `ndarray`
+   (`v.copy() if isinstance(v, np.ndarray) else v`), which fixes the read-only "actions" case
+   while passing scalar bytes/str leaves through untouched.
+3. **OOM at the step-6 checkpoint save, initially misdiagnosed as an async-checkpointing
+   hang** (jobs 228149 → 228165). Job 228149 appeared to hang indefinitely at
+   "Transferring arrays to host memory" (zero bytes written for 10+ minutes, main thread parked
+   on a futex) — looked like an orbax/JAX deadlock specific to a single-GPU allocation. Added
+   `TrainConfig.enable_async_checkpointing` (CLI-overridable, default `True`) as a diagnostic +
+   candidate fix. Job 228165 with `--no-enable-async-checkpointing` progressed further (wrote
+   the `params` item, 12.5GB) but was then **`Slurm oom_kill`'d (exit 137)** while writing the
+   larger `train_state` item (params + Adam `mu`/`nu` + EMA). This revealed the real root cause:
+   `DroidRldsDataset`'s default `shuffle_buffer_size=250_000` timesteps holds ~75GB of raw
+   images alone (two 224×224×3 images/timestep) — fine for real training's 8-GPU/`--mem=1200G`
+   allocations (`train_truncation.sbatch`), but far too much for a single-GPU job's `--mem=190G`,
+   on top of the checkpoint's own ~50-60GB transient footprint during save. **The original
+   228149 "hang" was very likely the same OOM condition, just manifesting as a slow, silent
+   thrash rather than an immediate kill** (memory pressure, not a real deadlock — confirmed via
+   `ps -T -o wchan` showing an actively-running (`Rl`, not blocked) worker thread mid-save,
+   ruling out a true deadlock hypothesis before finding the `oom_kill` line in the Slurm log).
+   Fixed by adding `DataConfig.shuffle_buffer_size` / `RLDSDroidDataConfig.shuffle_buffer_size`
+   (CLI-overridable via `--data.shuffle-buffer-size`, defaults `None` = unchanged 250_000 for
+   real training), and the repro sbatch now passes `--data.shuffle-buffer-size=5000`. Kept
+   `--no-enable-async-checkpointing` too, as cheap insurance against the async path's extra
+   host-memory buffering on a memory-constrained single-GPU job — re-evaluate both flags
+   (probably revert both) for the real multi-GPU training job, which has a much larger `--mem`
+   budget and wants async checkpointing for throughput.
+
+### venv decision
+
+`/work/roboleon1295/openpi-vlash` (the Task 0 worktree) had no venv. Built a **fresh venv in
+the worktree** rather than reusing `/work/roboleon1295/openpi/.venv` (the `mem-video-encoder-d-eval`
+checkout's venv): `docs/eval/TRUNCATION.md` (chungyi/pi05-layer-truncation) already documents
+why — openpi is installed editable, so a worktree sharing another checkout's venv would
+silently import the OTHER branch's code.
+
+```bash
+cd /work/roboleon1295/openpi-vlash
+export UV_CACHE_DIR=/work/roboleon1295/.cache/uv
+uv venv --python 3.11 .venv        # python 3.11 required: tensorflow-cpu==2.15.0 only ships cp311 wheels
+uv sync --group rlds               # NOT --no-sync here -- this is the one-time env build
+```
+
+No `GIT_LFS_SKIP_SMUDGE` needed — `uv sync --group rlds` completed without any LFS-related
+errors (nothing in this dependency set pulls LFS-tracked files). Training invocations use
+`uv run --no-sync python scripts/train.py ...` (matches `train_truncation.sbatch`'s
+convention: sync once, `--no-sync` on every actual run to avoid a redundant resync).
+
+### Gate evidence (Slurm job 228203)
+
+```
+$ sacct -j 228203 --format=JobID,State,ExitCode,Elapsed -n
+228203        COMPLETED      0:0   00:04:28
+```
+- **Reaches step 12** (steps 0-11 logged): yes, e.g. `Step 11: grad_norm=20.1563, loss=1.9622,
+  param_norm=1833.5470`.
+- **Checkpoint saved**: yes, both the mid-run save (step 6, `save_interval=6`) and the final
+  save (step 11, `step == num_train_steps - 1`) finalized cleanly (`Finished saving checkpoint
+  (finalized tmp dir) to .../vlash_repro/6` and `.../vlash_repro/11`); `max_to_keep=1` pruned
+  step 6's directory after step 11 saved (expected — `ls .../vlash_repro/` shows only `11`).
+  Checkpoint contains `assets/`, `_CHECKPOINT_METADATA`, `params/`, `train_state/`.
+- **No NaN loss**: yes, all 12 steps logged finite `grad_norm`/`loss` (loss ranged ~1.3-6.0,
+  `param_norm` constant at `1833.5470` as expected for one training step's worth of movement).
+- **Offset histogram shows spread over {0..3}**: yes —
+  `[vlash] first 32 sampled vlash_offset values: {0: 4, 1: 8, 2: 13, 3: 7}` (sums to 32, all
+  four values present).
+
+### Concerns / follow-ups for later tasks
+
+1. `enable_async_checkpointing=False` and `shuffle_buffer_size=5000` are repro-only overrides
+   passed on the CLI in `scripts/nchc/vlash_droid_repro.sbatch` — the base
+   `pi05_droid_jointpos_vlash` config itself still defaults to async checkpointing enabled and
+   the full 250_000-timestep shuffle buffer, which is correct for real training but means
+   nobody has yet exercised a real multi-GPU run's checkpoint-save path on this branch. Worth a
+   deliberate check (not just this repro) before a long real training job, given how close the
+   single-GPU repro came to OOMing even after the fix.
+2. The `state_proj`/`state_mlp_in`/`state_mlp_out` fresh-module restore was verified via the
+   full param listing in the job log, not via a dedicated automated check against the actual
+   downloaded checkpoint's key set (the config test's `test_weight_loader_allows_the_three_fresh_state_modules_missing`
+   only checks the regex against literal key strings, since the real checkpoint isn't available
+   in the local dev environment). Low risk since the nano4 job's full listing confirms it works
+   end-to-end, but flagging for completeness.
+3. `vlash_shared_obs: bool = False` (mentioned in the Task 3 brief's "Interfaces" section as a
+   forward-looking flag) and the LoRA variant via `freeze_filter` were explicitly out of scope
+   for this task (deferred to Task 5 per the brief) and were not added.

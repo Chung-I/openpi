@@ -156,3 +156,61 @@ streaming is how upstream openpi itself trains on DROID).
    /work/roboleon1295` before launching Task 4+ training, per Global Constraints.
 5. **5090 occupancy is a live/shared-machine reading**, not a guarantee — re-verify immediately
    before Task 9.
+
+## Task 2 — Temporal-offset transform + rollforward
+
+- Implemented `src/openpi/transforms_vlash.py`:
+  - `apply_offset(sample, *, delta, action_horizon)` — pure function. Slices
+    `actions[delta : delta + action_horizon]`; when `delta > 0`, rolls `state` forward:
+    `state[:7] += actions[:delta, :7].sum(axis=0)` (delta accumulation for the 7 joint-position
+    dims) and `state[7] = actions[delta - 1, 7]` (dim 7 is the absolute gripper command, so it
+    is replaced outright rather than accumulated). Records `sample["vlash_offset"] = delta`.
+    `delta == 0` is an exact identity (no copy, no mutation of `state` beyond the slice).
+  - `VlashTemporalOffset(delta_max, action_horizon, rng_key="vlash_offset")` — a
+    `transforms.DataTransformFn`-compatible frozen dataclass wrapper (matches the pattern used
+    by `DeltaActions`/`AbsoluteActions` etc. in `src/openpi/transforms.py`) that samples
+    `delta ~ Uniform{0, ..., delta_max}` and calls `apply_offset`. `rng_key` lets a caller
+    rename the output field from the default `"vlash_offset"` if needed for downstream
+    logging; `apply_offset` itself always writes the literal key `"vlash_offset"` (this is
+    part of its tested contract), and the wrapper renames post hoc only if `rng_key` differs.
+  - Must be inserted **after** `DeltaActions` in the jointpos pipeline (Task 3), since it
+    assumes `actions[..., :7]` are already delta-encoded and `actions[..., 7]` is still
+    absolute.
+
+- **Randomness decision** (brief asked to read the codebase convention and mirror it, or
+  document a `np.random.default_rng`-based choice if none exists):
+  - `grep -n "rng\|seed\|np.random\|random_state\|jax.random" src/openpi/transforms.py` →
+    **zero hits**. None of the existing transforms (`Normalize`, `DeltaActions`,
+    `ResizeImages`, `SubsampleActions`, ...) are randomized at all, so there is no
+    RNG/seeding convention in that module to mirror.
+  - A repo-wide `grep -rn "np.random\|default_rng"  src/openpi/` turned up only
+    unseeded `np.random.rand`/`np.random.randint` calls used to build **fake/test
+    observations** in `policies/*.py` and model tests — again, not a per-sample-deterministic
+    convention, just ad hoc unseeded sampling for synthetic inputs.
+  - **Decision**: `VlashTemporalOffset.__call__` draws a fresh, OS-entropy-seeded
+    `np.random.default_rng()` on every call (no stored/counter-based state, no hash of a
+    per-example key). Rationale: `vlash_offset` is a **training-time augmentation** —
+    analogous to random image augmentation — and is explicitly meant to vary per epoch for
+    the same underlying RLDS example, not to be a stable deterministic function of the
+    example's identity. RLDS map-level determinism (same example → same transform output on
+    every pass) is therefore *not* a requirement here, unlike e.g. normalization stats lookup
+    which must be deterministic. `test_transform_samples_in_range` in
+    `tests/test_vlash_offsets.py` encodes this: it calls the transform 200 times on the *same*
+    input sample and asserts all three possible offsets `{0, 1, 2}` are observed, which would
+    be impossible under per-sample-deterministic seeding.
+  - Caveat worth flagging for Task 3+: `np.random.default_rng()` with no seed is **not
+    reproducible across runs** (no global seed control, no way to replay an exact epoch's
+    offsets). If exact reproducibility of the offset sequence is ever needed (e.g. for
+    debugging a specific bad batch), a seeded variant would need a counter or worker-id-based
+    seed threaded through the data loader; out of scope for Task 2 per the brief.
+
+- **Tests**: `tests/test_vlash_offsets.py` (fixtures used verbatim from the Task 2 brief) —
+  `test_offset_zero_identity`, `test_offset_two_rollforward`, `test_transform_samples_in_range`.
+  All 3 pass: `.venv/bin/python -m pytest tests/test_vlash_offsets.py -x -q` → `3 passed`.
+  Verified TDD red→green: prior to writing `transforms_vlash.py`, the same test file failed
+  collection with `ModuleNotFoundError: No module named 'openpi.transforms_vlash'`.
+- `ruff check` and `ruff format --check` pass clean on `src/openpi/transforms_vlash.py`.
+  `tests/test_vlash_offsets.py` has two pre-existing ruff nits from the brief's verbatim
+  fixture (unsorted single-line import, `N803` on the `H` parameter name) — left as-is since
+  the brief specifies the fixture verbatim and this repo's `.pre-commit-config.yaml` is not
+  installed as a git hook here, so it does not block the commit.

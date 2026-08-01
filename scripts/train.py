@@ -25,6 +25,7 @@ import openpi.training.data_loader as _data_loader
 import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
+import openpi.training.vlash_eval as _vlash_eval
 import openpi.training.weight_loaders as _weight_loaders
 
 
@@ -234,6 +235,15 @@ def main(config: _config.TrainConfig):
     ]
     wandb.log({"camera_views": images_to_log}, step=0)
 
+    # VLASH per-offset held-out validation (Task 7): builds 4 tiny fixed-delta data loaders
+    # (one per delta), each pulled ONCE and cached, so the per-step cost of this hook firing
+    # is just a handful of small forward passes every `vlash_val_interval` steps -- see
+    # openpi.training.vlash_eval for the full design rationale.
+    val_hook = None
+    if config.vlash_val_interval is not None:
+        logging.info("Building VLASH per-offset held-out validation batches...")
+        val_hook = _vlash_eval.PerOffsetValLoss.build(config, sharding=data_sharding)
+
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
     jax.block_until_ready(train_state)
     logging.info(f"Initialized train state:\n{training_utils.array_tree_to_info(train_state.params)}")
@@ -268,6 +278,14 @@ def main(config: _config.TrainConfig):
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []
+
+        if val_hook is not None and step % config.vlash_val_interval == 0:
+            with sharding.set_mesh(mesh):
+                eval_model = nnx.merge(train_state.model_def, train_state.params)
+                val_info = val_hook.compute(eval_model)
+            pbar.write(f"Step {step} [val]: " + ", ".join(f"{k}={v:.4f}" for k, v in val_info.items()))
+            wandb.log(val_info, step=step)
+
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:

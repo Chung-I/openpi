@@ -420,6 +420,15 @@ class RLDSDroidDataConfig(DataConfigFactory):
     # Pi0.compute_loss_shared_obs (KV-broadcast).
     vlash_shared_obs: bool = False
 
+    # VLASH per-offset held-out validation (Task 7). When set, overrides the training-time
+    # random `VlashTemporalOffset` sampling with a FIXED delta via
+    # `transforms_vlash.VlashFixedOffset` -- same `apply_offset` core, called with a forced
+    # `delta` instead of a sampled one. Used only by the throwaway data configs
+    # `openpi.training.vlash_eval.PerOffsetValLoss.build` constructs to cache one held-out
+    # batch per delta; never set on a real training TrainConfig. Mutually exclusive with
+    # `vlash_shared_obs` (a fixed delta yields exactly one branch, not all `delta_max + 1`).
+    vlash_fixed_delta: int | None = None
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         repack_transform = _transforms.Group(
@@ -450,20 +459,33 @@ class RLDSDroidDataConfig(DataConfigFactory):
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
             )
             if self.vlash_delta_max is not None:
-                offset_transform = (
-                    transforms_vlash.VlashAllOffsets(
+                if self.vlash_fixed_delta is not None:
+                    if self.vlash_shared_obs:
+                        raise ValueError("vlash_fixed_delta and vlash_shared_obs are mutually exclusive.")
+                    if not 0 <= self.vlash_fixed_delta <= self.vlash_delta_max:
+                        raise ValueError(
+                            f"vlash_fixed_delta ({self.vlash_fixed_delta}) must be in "
+                            f"[0, vlash_delta_max={self.vlash_delta_max}]."
+                        )
+                    offset_transform = transforms_vlash.VlashFixedOffset(
+                        delta=self.vlash_fixed_delta,
+                        action_horizon=model_config.action_horizon,
+                    )
+                elif self.vlash_shared_obs:
+                    offset_transform = transforms_vlash.VlashAllOffsets(
                         delta_max=self.vlash_delta_max,
                         action_horizon=model_config.action_horizon,
                     )
-                    if self.vlash_shared_obs
-                    else transforms_vlash.VlashTemporalOffset(
+                else:
+                    offset_transform = transforms_vlash.VlashTemporalOffset(
                         delta_max=self.vlash_delta_max,
                         action_horizon=model_config.action_horizon,
                     )
-                )
                 data_transforms = data_transforms.push(inputs=[offset_transform])
         elif self.vlash_delta_max is not None:
             raise ValueError("vlash_delta_max requires action_space == DroidActionSpace.JOINT_POSITION.")
+        elif self.vlash_fixed_delta is not None:
+            raise ValueError("vlash_fixed_delta requires vlash_delta_max to be set.")
 
         # Shared-obs requires the data side (this factory) and the model side (Pi0Config) to
         # agree: the transform pipeline must emit `vlash_states` iff the model consumes them.
@@ -608,6 +630,14 @@ class TrainConfig:
     # docs/superpowers/plans/2026-08-01-vlash-droid-notes.md) -- pass
     # --no-enable-async-checkpointing to fall back to a slower but reliable synchronous save.
     enable_async_checkpointing: bool = True
+
+    # VLASH per-offset held-out validation (Task 7). When set, `scripts/train.py` builds a
+    # `openpi.training.vlash_eval.PerOffsetValLoss` hook (requires `data` to be an
+    # `RLDSDroidDataConfig` with `vlash_delta_max` set) and, every `vlash_val_interval` steps,
+    # logs flow-matching loss at each FIXED delta in [0, vlash_delta_max] on a small held-out
+    # batch cached once per delta -- `val_loss/delta_{d}` in wandb. None (default) disables
+    # the hook entirely; only the VLASH configs below set this.
+    vlash_val_interval: int | None = None
 
     # Used to pass metadata to the policy server.
     policy_metadata: dict[str, Any] | None = None
@@ -814,6 +844,7 @@ _CONFIGS = [
             decay_lr=5e-5,
         ),
         num_train_steps=20_000,
+        vlash_val_interval=1000,
         batch_size=32,
         num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
     ),
@@ -865,6 +896,7 @@ _CONFIGS = [
             decay_lr=5e-5,
         ),
         num_train_steps=20_000,
+        vlash_val_interval=1000,
         batch_size=32,
         num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
     ),
@@ -929,6 +961,7 @@ _CONFIGS = [
             decay_lr=5e-5,
         ),
         num_train_steps=20_000,
+        vlash_val_interval=1000,
         batch_size=32,
         num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
         # Turn off EMA for LoRA finetuning (matches pi0_libero_low_mem_finetune convention).

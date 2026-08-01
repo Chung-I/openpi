@@ -1,5 +1,5 @@
 import numpy as np
-from openpi.transforms_vlash import VlashTemporalOffset, apply_offset
+from openpi.transforms_vlash import VlashFixedOffset, VlashTemporalOffset, apply_offset
 
 
 def _sample(H=4, dmax=2, adim=8):
@@ -36,3 +36,15 @@ def test_transform_samples_in_range():
         seen.add(int(out["vlash_offset"]))
         assert out["actions"].shape == (4, 8)
     assert seen == {0, 1, 2}
+
+
+def test_fixed_offset_never_varies():
+    """VlashFixedOffset (Task 7 per-offset val hook) forces the SAME delta every call --
+    matches apply_offset(..., delta=2, ...) exactly, unlike VlashTemporalOffset's sampling."""
+    tr = VlashFixedOffset(delta=2, action_horizon=4)
+    for _ in range(5):
+        out = tr(_sample())
+        expected = apply_offset(_sample(), delta=2, action_horizon=4)
+        np.testing.assert_array_equal(out["actions"], expected["actions"])
+        np.testing.assert_array_equal(out["state"], expected["state"])
+        assert out["vlash_offset"] == 2

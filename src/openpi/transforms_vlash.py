@@ -129,6 +129,25 @@ class SplitVlashBranches(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class VlashFixedOffset(DataTransformFn):
+    """Applies `apply_offset` with a FORCED delta -- no sampling.
+
+    Task 7 per-offset validation hook: building a held-out batch at each fixed delta in
+    `{0, ..., delta_max}` reuses this exact same `apply_offset` core the training-time
+    `VlashTemporalOffset` uses, just with `delta` forced instead of drawn from
+    `Uniform{0, ..., delta_max}`. Must be inserted at the same pipeline position as
+    `VlashTemporalOffset` (right after `transforms.DeltaActions`) -- see
+    `RLDSDroidDataConfig.vlash_fixed_delta` in `training/config.py`.
+    """
+
+    delta: int
+    action_horizon: int
+
+    def __call__(self, data: DataDict) -> DataDict:
+        return apply_offset(data, delta=self.delta, action_horizon=self.action_horizon)
+
+
+@dataclasses.dataclass(frozen=True)
 class VlashTemporalOffset(DataTransformFn):
     """Samples a random temporal offset and applies `apply_offset`.
 

@@ -14,6 +14,7 @@ TrainConfig on either branch -- on chungi/pi05-layer-truncation it only exists i
 `_truncation_arm`; there is no bare "pi05_droid_jointpos" config name to compare against.
 """
 
+import dataclasses
 import re
 
 import flax.nnx as nnx
@@ -293,3 +294,49 @@ def test_lora_config_ema_disabled():
     off for LoRA finetuning."""
     config = _config.get_config(LORA_CONFIG_NAME)
     assert config.ema_decay is None
+
+
+# ----------------------------------------------------------------------------------------------
+# Task 7: per-offset held-out validation hook wiring (`vlash_val_interval`, `vlash_fixed_delta`).
+# ----------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", [CONFIG_NAME, SHARED_CONFIG_NAME, LORA_CONFIG_NAME])
+def test_vlash_configs_enable_val_interval(name):
+    config = _config.get_config(name)
+    assert config.vlash_val_interval == 1000
+
+
+def test_upstream_configs_leave_val_interval_disabled():
+    """Guards against Task 7 accidentally turning the hook on for non-VLASH configs."""
+    config = _config.get_config("pi05_droid")
+    assert config.vlash_val_interval is None
+
+
+def test_vlash_fixed_delta_replaces_random_sampling():
+    """`vlash_fixed_delta` (used by `openpi.training.vlash_eval.PerOffsetValLoss.build` to
+    cache one held-out batch per delta) swaps in `VlashFixedOffset` -- same pipeline position
+    as `VlashTemporalOffset`, but forced instead of sampled."""
+    config = _config.get_config(CONFIG_NAME)
+    fixed_data_cfg = dataclasses.replace(config.data, vlash_fixed_delta=2)
+    data_config = fixed_data_cfg.create(config.assets_dirs, config.model)
+    kinds = [type(t) for t in data_config.data_transforms.inputs]
+    assert transforms_vlash.VlashFixedOffset in kinds
+    assert transforms_vlash.VlashTemporalOffset not in kinds
+    offset_transform = data_config.data_transforms.inputs[kinds.index(transforms_vlash.VlashFixedOffset)]
+    assert offset_transform.delta == 2
+    assert offset_transform.action_horizon == 15
+
+
+def test_vlash_fixed_delta_out_of_range_raises():
+    config = _config.get_config(CONFIG_NAME)
+    fixed_data_cfg = dataclasses.replace(config.data, vlash_fixed_delta=4)  # > vlash_delta_max=3
+    with pytest.raises(ValueError, match="vlash_fixed_delta"):
+        fixed_data_cfg.create(config.assets_dirs, config.model)
+
+
+def test_vlash_fixed_delta_and_shared_obs_mutually_exclusive():
+    config = _config.get_config(SHARED_CONFIG_NAME)
+    fixed_data_cfg = dataclasses.replace(config.data, vlash_fixed_delta=0)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        fixed_data_cfg.create(config.assets_dirs, config.model)

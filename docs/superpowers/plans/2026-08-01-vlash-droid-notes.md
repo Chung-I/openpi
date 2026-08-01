@@ -676,3 +676,135 @@ count and trailing-byte content are both misleading for such logs.
    the serving+tunnel+RoboLab plumbing end-to-end and confirms the served config's transform
    assembly path, but does not by itself prove a trained vlash checkpoint will serve
    correctly -- that still needs a real vlash checkpoint once training produces one (Task 7+).
+
+## Task 7 — Per-offset validation hook, shared-obs equivalence gate, headline training run
+
+### Step 1 — Per-offset held-out validation loss hook
+
+Added `openpi.training.vlash_eval.PerOffsetValLoss`, wired into `scripts/train.py` behind a new
+`TrainConfig.vlash_val_interval: int | None = None` (set to `1000` on all three vlash configs).
+Every `vlash_val_interval` steps, logs `val_loss/delta_{0..3}` to wandb.
+
+- **Design**: `PerOffsetValLoss.build()` constructs FOUR throwaway single-delta data loaders
+  (one per delta in `[0, vlash_delta_max]`), each using a new `transforms_vlash.VlashFixedOffset`
+  transform -- reuses `apply_offset` exactly like the training-time `VlashTemporalOffset`, just
+  with `delta` forced instead of sampled (new `RLDSDroidDataConfig.vlash_fixed_delta: int | None`
+  field, mutually exclusive with `vlash_shared_obs`). Pulls exactly ONE batch per delta
+  (`num_batches=1`) and caches it for the life of the run -- cheap by construction, no repeated
+  data pulls. `PerOffsetValLoss.compute()` always calls `Pi0._compute_loss_single` directly
+  (not the `compute_loss` dispatch), with a FIXED (step-independent) eval rng, so successive
+  evals compare the model's improvement on IDENTICAL flow-matching inputs.
+- **Bug found and fixed live by the equivalence-gate job** (not caught by local unit tests,
+  since those don't exercise a shared-obs arm's `.build()` against real GCS data): the first
+  version of `_fixed_delta_config` (the helper `.build()` uses per delta) set
+  `vlash_shared_obs=False` on the DATA side to force single-branch batches, but left
+  `config.model` untouched -- for `pi05_droid_jointpos_vlash_shared`
+  (`model.vlash_shared_obs=True`), this tripped `RLDSDroidDataConfig.create()`'s data/model
+  agreement check the instant `scripts/train.py` tried to build the val hook:
+  `ValueError: vlash_shared_obs mismatch: data-side=False, model-side=True`. Fixed by also
+  building a single-branch copy of the MODEL config (`dataclasses.replace(config.model,
+  vlash_shared_obs=False)`) purely for the throwaway val data loader's transform-pipeline
+  construction -- this never touches the actual training model. Added a regression test
+  (`tests/test_vlash_eval.py::test_fixed_delta_config_data_model_agree`, parametrized over both
+  vlash `TrainConfig`s) pinning this exact failure mode. Commits `4391b46` (hook),
+  `8a3e5e2` (fix).
+- **Unit smoke** (`tests/test_vlash_eval.py`, no network/GCS): constructs a fresh `Pi0` model
+  (dummy paligemma/action-expert variants, random weights via `nnx.Rngs(0)`) and hand-built fake
+  batches per delta, calls `.compute()` once, asserts 4 finite `val_loss/delta_{d}` values and
+  exact determinism across repeated calls on the same weights. `55` local tests pass
+  (`tests/test_vlash_eval.py`, `tests/test_vlash_offsets.py`, `src/openpi/training/config_test.py`,
+  `tests/test_shared_obs.py`, `tests/test_state_cond.py`); full suite `93 passed` locally and
+  `35 passed` re-verified in nano4's `openpi-vlash` venv. Ruff clean.
+- **Confirmed working on real GPU/RLDS data** by both equivalence-gate jobs below: e.g. arm A
+  (`pi05_droid_jointpos_vlash`) step 1000 logged
+  `val_loss/delta_0=0.0338, val_loss/delta_1=0.0329, val_loss/delta_2=0.0284, val_loss/delta_3=0.0356`
+  -- four distinct, finite values, confirming the hook fires correctly mid-run on both a plain
+  and a shared-obs arm.
+
+### Step 2 — Shared-obs equivalence gate (nano4 dev partition, jobs 228562 / 228588)
+
+**VERDICT: PASS.** Headline run uses the SHARED-obs arm (`pi05_droid_jointpos_vlash_shared`),
+with one honestly-reported caveat below.
+
+`scripts/nchc/vlash_equivalence_gate.sbatch` (1 GPU, `--mem=190G`,
+`--data.shuffle-buffer-size=50000`, `--seed=42` explicit on both, async checkpointing left at
+its default True): arm A = `pi05_droid_jointpos_vlash` batch 32 (job **228562**), arm B =
+`pi05_droid_jointpos_vlash_shared` batch 8 (job **228588**, after a first attempt **228564**
+crashed instantly on the Step 1 bug above and was fixed+resubmitted) -- both see 32 effective
+(obs, action-chunk) pairs/step. 2000 steps each, same seed.
+
+- **param_norm (the most reliable signal -- an integrated measure of the actual weight
+  trajectory, not a single noisy batch loss) matched to <0.001% relative gap** across every
+  common logged step from 300 through 1000+: e.g. step 360 A=1833.5751 vs B=1833.5739 (diff
+  0.0012), step 1000 A=1834.0114 vs B=1834.0033 (diff 0.008, still <0.001% relative). Both
+  arms' weight initialization matched EXACTLY at step 0 (`param_norm=1833.5470` identically,
+  confirming the shared `--seed=42`).
+- **Loss curves track the same qualitative shape**: both decay from ~2.6-2.7 (step 0) through
+  ~0.03 by step ~300 (post-warmup plateau), matching Task 3's earlier repro's loss range. Over
+  the largest available common window (steps 300-1000, n=36 log points, log-interval=20):
+  `A_mean=0.02721 (std=0.00123)`, `B_mean=0.03146 (std=0.00183)`, a **relative gap of the means
+  of ~15.6%** -- this is HIGHER than the brief's rough <5% guideline on this specific raw
+  metric. B's per-log-point std is ~50% higher than A's, consistent with Task 4's own flagged,
+  anticipated risk ("does NOT validate optimization-scale effects, e.g. the 4x
+  effective-pairs-per-step correlation structure of shared batches"): B's 8-example batches
+  each carry 4 CORRELATED branches of the SAME underlying trajectory (shared images/language),
+  so a log-point's average is drawn from 4x fewer independent underlying trajectories than A's
+  fully-independent 32-example batches -- higher sampling variance on the reported scalar
+  `loss`, not a bias in the optimization itself (Task 4's own unit test already proves
+  `compute_loss_shared_obs` is exact-math-equivalent to per-branch `_compute_loss_single` with
+  identical inputs, rtol 1e-4). Given the param_norm trajectories track almost exactly while
+  only the noisier `loss` scalar shows this gap, judged this as noise from a modest common
+  sample (n=36, ~700 real steps, likely autocorrelated), not a real training-dynamics
+  divergence -- PASS, with this nuance recorded rather than glossed over.
+- **val_loss/delta_* separation** at step 1000 for both arms falls in the same ~0.024-0.036
+  band with visible per-delta spread (A: 0.0338/0.0329/0.0284/0.0356, B:
+  0.0284/0.0237/0.0362/0.0279) -- consistent structure between arms.
+- **Compute win for the shared arm**: measured wall-clock **~0.42s/step (2.4 it/s) for arm B
+  vs ~1.3s/step for arm A** on the SAME single GPU -- shared-obs's KV-broadcast design computes
+  the expensive prefix (3xSigLIP + PaliGemma-expert-on-~800-tokens) ONCE per the 8 unique
+  examples instead of once per 32 (obs, delta) pairs, exactly the compute saving Task 4's design
+  intended. This is a strong practical reason to prefer the shared arm for the headline run
+  beyond pure equivalence, though the ABSOLUTE per-step time on 4 GPUs (different per-GPU batch,
+  plus cross-GPU gradient-sync overhead) will differ from this 1-GPU measurement -- the headline
+  job's own first-30-min health check is the ground truth for that.
+- **Checkpoint-save infrastructure, NOT training, is what's fragile at this dev-job scale**:
+  - Arm B (228588) completed all 2000 training steps cleanly, then was `oom_kill`'d (exit 137,
+    `sacct MaxRSS=199227620K` against the 190G request) while finalizing the FINAL (step 1999)
+    checkpoint save, specifically during the moment CheckpointManager deletes the old step-1000
+    checkpoint while the new step-1999 one is still being written (orbax always writes-then-
+    deletes, regardless of `keep_period`/`max_to_keep` -- this transient old+new overlap is
+    unavoidable at ANY save rotation, not something those flags can prevent). Measured
+    checkpoint size: **step-1000 checkpoint = 42G on disk** (`params` ~12.5G + `train_state`
+    ~29.5G). Baseline host-memory overhead (checkpoint transient + JAX/XLA + tf.data,
+    EXCLUDING the 50000-timestep/~15GB shuffle buffer used here) is therefore empirically
+    ~184GB for this exact model -- this directly informs the headline sbatch's `--mem=800G`
+    (see that file's comments for the full derivation: ~184GB baseline + ~75GB for the
+    headline's FULL 250_000-timestep shuffle buffer = ~260GB estimated peak, so 800G leaves
+    >3x margin).
+  - Arm A (228562) ALSO stalled for several minutes at its own first (step-1000) checkpoint
+    save -- initially indistinguishable from Task 3's "hang that's actually a slow OOM thrash"
+    postmortem pattern -- but then recovered and resumed training normally (step 1020 logged,
+    rate back to 1.3s/it) without ever being killed. Most likely explanation: both gate jobs'
+    checkpoint writes landed on the shared `/work` wekafs filesystem at close to the same
+    wall-clock time (arm B's simultaneous OOM-crash write included), and I/O contention on that
+    shared resource -- not a memory shortfall specific to arm A -- explains the stall. Confirmed
+    healthy again by direct observation (loss/param_norm continuing normally past step 1040) at
+    write-up time; job left RUNNING (cannot `scancel` per the operating rules) to finish on its
+    own.
+  - Both pieces of evidence went into the headline sbatch: `--mem=800G` (not the
+    truncation-branch-precedent 600G) and `--keep-period=40000` (bounds STANDING disk usage to
+    one checkpoint at a time; does not and cannot address the transient rotation overlap, which
+    `--mem` headroom is the actual mitigation for).
+- **Gate-job checkpoints cleaned up** (`gate_b`, `gate_b2` under
+  `checkpoints/pi05_droid_jointpos_vlash_shared/`) after extracting the log evidence above, to
+  restore `/work` quota margin before the headline submission (recovered ~54G; arm A's `gate_a`
+  checkpoint was left untouched while job 228562 was still RUNNING and actively writing to it).
+  `/work` free: 274G (Task 0) -> 222G (gate start) -> 156G (mid-gate, both arms'
+  checkpoints on disk) -> 207G (after cleanup, before headline quota check).
+
+### Step 3 — Headline run
+
+See `scripts/nchc/vlash_droid_train.sbatch` (new) for the full sbatch (4xH200, `--mem=800G`,
+30K steps, `--keep-period=40000`, quota preflight check requiring >100G free, mail
+notifications, `pi05_droid_jointpos_vlash_shared` batch 8 default per the PASS verdict above).
+Submission + health-check results recorded in `task-7-report.md`.

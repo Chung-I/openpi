@@ -487,3 +487,192 @@ refactor) all pass. Ruff clean on all touched files.
 4. Other DataConfig factories ignore `model_config.vlash_shared_obs`; using a shared-obs model
    with a non-RLDS data config fails at train time with the informative
    "requires observation.vlash_states" ValueError rather than at config time.
+
+## Task 6 — Serving path, SSH tunnel, PRE-TRAINING RoboLab smoke
+
+**Status: PASSED.** Server job 228315 serving the RELEASED baseline is still RUNNING on
+nano4; a plain SSH tunnel round-trips in ~65-140ms; a 2-episode RoboLab smoke against that
+tunnel completed both episodes end-to-end with no protocol errors.
+
+### Step 1 — Serving transform check + config port
+
+**No code change needed for the tokenizer path.** `policy_config.create_trained_policy`
+calls `train_config.data.create(train_config.assets_dirs, train_config.model)` — the exact
+same `DataConfigFactory.create()` used by the training data loader — and every
+`DataConfigFactory` subclass builds its `model_transforms` via
+`ModelTransformFactory()(model_config)` (config.py lines ~239-243, 289-295, 366-373,
+479-493, 531-537). Task 3's `pi05_no_state=model_config.state_cond` wiring
+(`ModelTransformFactory.__call__`, PI05 branch) is therefore automatically exercised at
+serve time for any `state_cond=True` config, `pi05_droid_jointpos_vlash` included -- this
+was verified by code inspection, not a new test (no test file changes needed).
+
+**Config port required and done.** The plain `pi05_droid_jointpos` `TrainConfig` (the one
+`serve_policy.py` needs to serve the RELEASED, non-vlash baseline checkpoint) did not exist
+on `vlash-droid` -- confirmed via `git log --all` + `git show <sha>:src/openpi/training/
+config.py`: it traces to a commit on `chungyi/wip/nano4-mem-cluster-work`
+(`6536cbac88e21e...`), not to `chungyi/pi05-layer-truncation` (whose `_truncation_arm`
+inline configs are named `pi05_droid_jointpos_trunc{N}`, a different RLDS-based recipe).
+Ported it verbatim into `src/openpi/training/config.py` (right after `pi05_droid`, before
+the "VLASH-on-DROID configs" section): `SimpleDataConfig`, `AbsoluteActions(make_bool_mask(7,
+-1))` on the output side (converts the released checkpoint's joint-*velocity* output to
+absolute joint-position targets for sim), `asset_id="droid"` with no `assets_dir` override
+(serving loads norm stats straight from `checkpoint_dir / "assets"` per
+`create_trained_policy`, so `assets_dir` is inert for this config -- only `asset_id`
+matters). Verified: `_config.get_config("pi05_droid_jointpos")` loads cleanly both locally
+and on nano4's `openpi-vlash` venv; `ruff check`/`format --check` clean;
+`config_test.py` 22/22 still pass (unaffected).
+
+Committed as `17f4c3f` on `vlash-droid`, pushed to `chungyi/vlash-droid`, fast-forwarded
+into the nano4 `/work/roboleon1295/openpi-vlash` worktree (was at `8eb98a6`, jumped straight
+to `17f4c3f` -- this also picked up Tasks 4/5's commits, which had not yet been pulled there).
+
+### Step 2 — Serve sbatch
+
+`scripts/nchc/vlash_droid_serve.sbatch`: dev partition, 1 GPU, 12 CPU, 100G, 4h (matches the
+brief's sizing, distinct from `serve_truncation.sbatch`'s 8gpus-partition + tailscale
+approach -- this is reached via a plain SSH `-L` tunnel through nano4's login node instead,
+since a dev-partition compute node is directly reachable from the login node). Prints
+`SERVER_NODE:$(hostname)` before the (slow, ~1min) model load so the operator can open the
+tunnel without waiting for full warmup. `serve_policy.py` wants the **top-level checkpoint
+directory** (containing both `params/` and `assets/`), not the `params/` subdir --
+confirmed by reading `create_trained_policy`: `checkpoint_dir / "params"` and
+`checkpoint_dir / "assets"` are both derived from the same argument.
+
+Submitted: `sbatch scripts/nchc/vlash_droid_serve.sbatch` (defaults: config=
+`pi05_droid_jointpos`, ckpt=`/work/roboleon1295/checkpoints/pi05_droid_jointpos`, port=8000)
+-> **job 228315**, node **25a-hgpn006**. Server log confirms: checkpoint restored in 4.96s,
+norm stats loaded from `checkpoint_dir/assets/droid` (NOT from the worktree's local `assets/`
+dir, which doesn't have this asset -- expected, see the "Norm stats not found ... skipping"
+info line), websocket listening on `0.0.0.0:8000` within ~1 minute of job start. **Job left
+RUNNING** per the brief (dev partition, 4h cap -- elapsed ~2h13m as of this writing, so it
+will need resubmission if Task 9 runs more than ~1h45m from now).
+
+### Step 3 — Tunnel + latency
+
+`ssh -f -N -L 8000:25a-hgpn006:8000 nano4` (backgrounded, reuses the existing ControlMaster
+mux to nano4 -- pid 413558, `netstat`/`ss` confirms `LISTEN` on both `127.0.0.1:8000` and
+`[::1]:8000`). Verified with a direct `openpi_client.websocket_client_policy` script (see
+`/tmp/.../scratchpad/measure_latency.py`, run via RoboLab's `.venv` since that's where
+`openpi_client` is installed per the brief) using a **dummy DROID obs**: two random
+224x224x3 uint8 images through `image_tools.resize_with_pad`, random 7-dim joint position +
+1-dim gripper, and a text prompt -- shape/keys mirror `Pi0DroidJointposClient._pack_request`
+(`observation/exterior_image_1_left`, `observation/wrist_image_left`,
+`observation/joint_position`, `observation/gripper_position`, `prompt`).
+
+- **Warmup call: 16.47s** (first call pays JAX JIT/trace compile cost -- one-time per server
+  process, not per-connection).
+- **Steady state (10 calls after warmup): mean 80.9ms, median 72.8ms, min 65.7ms, max
+  137.9ms.**
+- **Implied Δ (`ceil(latency x 15Hz)`) for the eval arms: Δ=2** using the median/mean
+  (~73-81ms -> 1.1-1.2 -> ceil 2); **Δ=3** if sizing to the observed worst case (138ms ->
+  2.07 -> ceil 3). Recommend Task 9 use Δ=3 as the conservative default given single-sample
+  variance here (n=10), and re-measure with a larger sample if Δ turns out to matter at the
+  margin.
+- Server-side log shows one clean `Connection from (...) opened` / `closed` pair for this
+  test with no errors in between; the only tracebacks in the serve log are from unrelated
+  manual `curl`/raw-handshake probes during setup (expected 426 rejections, not protocol
+  bugs).
+
+### Step 4 — RoboLab 2-episode smoke
+
+`nvidia-smi` gate checked **twice** (start of Task 6, and again immediately before running
+the smoke): RTX 5090 free both times (114 MiB / 32607 MiB used, 0 compute processes, 0%
+util) -- proceeded per the brief.
+
+Ran `policies/pi0_family/run.py --policy pi05 --headless --task StaticBallInBowlTask
+--num-envs 1 --num-runs 2 --disable-subtask --output-folder-name vlash_task6_smoke` from
+`~/Codes/RoboLab` (`.venv/bin/python` directly rather than `uv run python` -- equivalent,
+same venv, no resync needed).
+
+**Two CLI/environment quirks hit along the way (both worked around, no RoboLab code
+touched, per the brief's "read-mostly" scope):**
+
+1. **`OMNI_KIT_ACCEPT_EULA=Y` required.** Headless/`nohup`'d Isaac Sim launches hit an
+   interactive `input("Do you accept the EULA? (Yes/No): ")` on first use
+   (`omni/kit_app.py`), which raises `EOFError` under a detached stdin. Env var bypasses it
+   (checked in `omni/kit_app.py::check_eula`).
+2. **`--task` wants the Task *class* name, not the file/snake_case name.**
+   `--task static_ball_in_bowl_task` raises `FileNotFoundError: Task class
+   'static_ball_in_bowl_task' not found`; `auto_discover_and_create_cfgs` keys its task
+   registry by `get_task_class_name_from_file(...).  __name__`, i.e. `StaticBallInBowlTask`.
+
+**One genuine RoboLab-side bug hit and worked around via `--disable-subtask`** (not fixed,
+per this task's read-mostly scope for RoboLab -- flagging for whoever owns that repo):
+`StaticBallInBowlTask.contact_object_list = ["ball", "banana", "bowl"]` (no `"table"`), but
+`BallInBowlTerminations`' subtask/event tracking calls `gripper_hit_table` ->
+`world.in_contact(gripper, table)`, which looks up a contact sensor pair
+(`gripper__table`/`table__gripper`) that was never registered because `contact_object_list`
+doesn't include `"table"`. This raises `ValueError: Contact sensor gripper__table or
+table__gripper not found` from inside `subtask_recorder.py::record_post_step` on the very
+first env step, killing the run before any episode could finish -- **with subtask tracking
+enabled, one action still executed successfully first** (confirmed via log: `Connected to
+localhost:8000` followed by one `env.step(actions)` before the crash), so this bug is
+unrelated to the openpi serving path; it is purely a RoboLab task-registration mismatch
+between `contact_object_list` and the termination/subtask predicates it uses.
+`--disable-subtask` (a supported, documented flag -- gates `ENABLE_SUBTASK_PROGRESS_CHECKING`
+in `robolab/core/environments/base.py`) skips registering the offending recorder term
+entirely and was sufficient to get both episodes running end-to-end (episode results have no
+score/reason/events as a result, which is fine -- brief says task success is not the gate).
+
+**Gate result (from `output/vlash_task6_smoke/episode_results.jsonl` + per-episode
+`log_N_env0.json`/video/hdf5, all present and complete on disk):**
+
+| run | steps | success | policy_inference_avg_ms (diluted, see below) | wall_total_s |
+|---|---|---|---|---|
+| `StaticBallInBowlTask_0` | 352 | **True** | 14.1 | 76.1 |
+| `StaticBallInBowlTask_1` | 375 (full episode budget) | False | 13.6 | 77.7 |
+
+Both episodes: full-length video files (23.4s / 24.9s, matching `dt=0.0667s x steps`),
+complete `run_N.hdf5` (proprio/action/image traces), complete result JSON. **No protocol
+errors** -- nano4's serve log shows clean `Connection from (...) opened`/`closed` pairs for
+the RoboLab client's session(s) spanning both episodes, no `ERROR`/traceback entries in that
+window. Actions clearly "flowed": episode 0 even solved the task (`success: true`); episode
+1 ran the full step budget without solving it (not the gate, per the brief).
+
+**Note on `policy_inference_avg_ms` (14.1/13.6 above): this is NOT the per-network-call
+latency.** `episode.py`'s `TimingStats` wraps `client.infer_batch(...)` once per
+*environment* step (all 352/375 of them), but `Pi0DroidJointposClient` only queries the
+server once per `open_loop_horizon=15` steps (pi05 default) and returns a cached action
+otherwise -- so this average blends ~23-25 real network calls (~100-200ms each, roughly
+consistent with the Step 3 measurement once the client-side obs-packing overhead from real
+rendered frames is added) with ~330+ free cache hits. **Use the Step 3 dummy-obs measurement
+(median 72.8ms / mean 80.9ms, Δ=2-3) for eval-arm Δ sizing, not this diluted figure.**
+
+**Investigated-and-resolved false alarm worth recording:** mid-task, a check of `nvidia-smi`
++ `ps aux` + the raw log's *tail bytes* looked like the smoke process had died silently
+during Isaac boot (the last ~2000 bytes of the log were plain `omni.hydra` warnings with no
+visible policy/episode content). This was a **byte-offset red herring, not a real
+failure**: `grep -abo` on the raw log proved the "boot-looking" warning block actually
+occurs, by byte offset, *after* episode 1 reached 374/375 steps (offset 63555 vs. 60896-60966
+for `374/375`) -- tqdm's `\r`-only progress updates plus interleaved warning spam made a
+`tail -c N` byte-window land inside a block that reads like early boot chatter but is
+actually late-run noise. The real evidence that resolved it was **output-directory
+artifacts**, not console log parsing: complete `episode_results.jsonl` with both episodes'
+full timing/metrics, complete per-episode JSON/video/hdf5. Lesson for future log
+inspection here: prefer `grep -abo` (byte offsets) or checking output-directory artifacts
+over `tail -c`/`wc -l` on a log containing carriage-return-updated progress bars, since line
+count and trailing-byte content are both misleading for such logs.
+
+### Concerns / follow-ups
+
+1. **Dev-partition serve job has a 4h wall-clock cap.** Job 228315 was submitted ~2h before
+   this write-up; if Task 9 runs more than ~1h45m after this note, the job will have expired
+   and needs resubmission (`sbatch scripts/nchc/vlash_droid_serve.sbatch`, then a fresh
+   tunnel to whatever node it lands on).
+2. **Δ sizing used n=10 steady-state samples from one server process** -- fine for a
+   pre-training smoke gate, but Task 9 (which actually depends on Δ being right) should
+   re-measure with a larger sample and/or under the same load pattern RoboLab actually
+   produces (chunked queries, not back-to-back single calls) before treating Δ=2 vs Δ=3 as
+   settled.
+3. **RoboLab bug not fixed** (out of scope, read-mostly): `StaticBallInBowlTask`'s
+   `contact_object_list` should probably include `"table"` if this task family's
+   `BallInBowlTerminations`/subtask predicates are meant to check gripper-table contact, or
+   the predicate should degrade gracefully when the sensor isn't registered instead of
+   raising. Ran the smoke with `--disable-subtask` as a workaround; any future *scored* run
+   of this exact task (not just a plumbing smoke) will hit the same crash without either a
+   RoboLab-side fix or the same flag.
+4. **This smoke served the RELEASED (non-vlash) baseline**, not a
+   `pi05_droid_jointpos_vlash` checkpoint (none exists yet -- training hasn't run). It proves
+   the serving+tunnel+RoboLab plumbing end-to-end and confirms the served config's transform
+   assembly path, but does not by itself prove a trained vlash checkpoint will serve
+   correctly -- that still needs a real vlash checkpoint once training produces one (Task 7+).

@@ -125,3 +125,56 @@ def test_state_cond_requires_pi05():
     """Task 1 review follow-up: state_cond=True must assert pi05=True in __post_init__."""
     with pytest.raises(ValueError, match="state_cond"):
         pi0_config.Pi0Config(pi05=False, state_cond=True)
+
+
+# ----------------------------------------------------------------------------------------------
+# Task 4: shared-observation variant `pi05_droid_jointpos_vlash_shared`.
+# ----------------------------------------------------------------------------------------------
+
+SHARED_CONFIG_NAME = "pi05_droid_jointpos_vlash_shared"
+
+
+def test_shared_config_flags():
+    config = _config.get_config(SHARED_CONFIG_NAME)
+    assert config.model.vlash_shared_obs is True
+    assert config.model.state_cond is True
+    assert config.data.vlash_shared_obs is True
+    assert config.data.vlash_delta_max == 3
+
+
+def test_shared_config_uses_all_offsets_and_branch_split():
+    config = _config.get_config(SHARED_CONFIG_NAME)
+    data_config = config.data.create(config.assets_dirs, config.model)
+    data_kinds = [type(t) for t in data_config.data_transforms.inputs]
+    assert transforms_vlash.VlashAllOffsets in data_kinds
+    assert transforms_vlash.VlashTemporalOffset not in data_kinds
+    assert data_kinds.index(transforms_vlash.VlashAllOffsets) > data_kinds.index(_transforms.DeltaActions)
+    # SplitVlashBranches must be the LAST model transform (after Normalize, which runs
+    # between data_transforms and model_transforms, and after PadStatesAndActions), so every
+    # branch state is normalized/padded identically before the stack is split.
+    model_kinds = [type(t) for t in data_config.model_transforms.inputs]
+    assert model_kinds[-1] is transforms_vlash.SplitVlashBranches
+    assert model_kinds.index(transforms_vlash.SplitVlashBranches) > model_kinds.index(_transforms.PadStatesAndActions)
+    # The RLDS window still needs the delta_max lookahead.
+    assert data_config.rlds_action_horizon == 18
+
+
+def test_shared_obs_flag_mismatch_raises():
+    import dataclasses
+
+    config = _config.get_config(SHARED_CONFIG_NAME)
+    plain_model = dataclasses.replace(config.model, vlash_shared_obs=False)
+    with pytest.raises(ValueError, match="vlash_shared_obs"):
+        config.data.create(config.assets_dirs, plain_model)
+
+
+def test_unshared_vlash_config_untouched_by_task4():
+    """The Task 3 config must keep sampling a single offset (no branch stacking)."""
+    config = _config.get_config(CONFIG_NAME)
+    assert config.model.vlash_shared_obs is False
+    assert config.data.vlash_shared_obs is False
+    data_config = config.data.create(config.assets_dirs, config.model)
+    data_kinds = [type(t) for t in data_config.data_transforms.inputs]
+    assert transforms_vlash.VlashTemporalOffset in data_kinds
+    assert transforms_vlash.VlashAllOffsets not in data_kinds
+    assert transforms_vlash.SplitVlashBranches not in [type(t) for t in data_config.model_transforms.inputs]

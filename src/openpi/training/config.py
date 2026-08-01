@@ -409,6 +409,16 @@ class RLDSDroidDataConfig(DataConfigFactory):
     # dims 0..6 are already delta-encoded and dim 7 is the absolute gripper command.
     vlash_delta_max: int | None = None
 
+    # VLASH shared-observation training (opt-in). Requires vlash_delta_max to be set AND
+    # model_config.vlash_shared_obs=True (both checked in create()). Instead of sampling ONE
+    # offset per example (VlashTemporalOffset), emits ALL `vlash_delta_max + 1` offset
+    # branches stacked per example (VlashAllOffsets); after Normalize and PadStatesAndActions
+    # have run identically over every branch, SplitVlashBranches (appended to the end of the
+    # model transforms) moves the stack to `vlash_states` and restores branch-0 `state`. The
+    # model then shares the prefix forward pass across branches via
+    # Pi0.compute_loss_shared_obs (KV-broadcast).
+    vlash_shared_obs: bool = False
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         repack_transform = _transforms.Group(
@@ -439,18 +449,37 @@ class RLDSDroidDataConfig(DataConfigFactory):
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
             )
             if self.vlash_delta_max is not None:
-                data_transforms = data_transforms.push(
-                    inputs=[
-                        transforms_vlash.VlashTemporalOffset(
-                            delta_max=self.vlash_delta_max,
-                            action_horizon=model_config.action_horizon,
-                        )
-                    ],
+                offset_transform = (
+                    transforms_vlash.VlashAllOffsets(
+                        delta_max=self.vlash_delta_max,
+                        action_horizon=model_config.action_horizon,
+                    )
+                    if self.vlash_shared_obs
+                    else transforms_vlash.VlashTemporalOffset(
+                        delta_max=self.vlash_delta_max,
+                        action_horizon=model_config.action_horizon,
+                    )
                 )
+                data_transforms = data_transforms.push(inputs=[offset_transform])
         elif self.vlash_delta_max is not None:
             raise ValueError("vlash_delta_max requires action_space == DroidActionSpace.JOINT_POSITION.")
 
+        # Shared-obs requires the data side (this factory) and the model side (Pi0Config) to
+        # agree: the transform pipeline must emit `vlash_states` iff the model consumes them.
+        model_side_shared_obs = getattr(model_config, "vlash_shared_obs", False)
+        if self.vlash_shared_obs != model_side_shared_obs:
+            raise ValueError(
+                f"vlash_shared_obs mismatch: data-side={self.vlash_shared_obs}, "
+                f"model-side={model_side_shared_obs}. Set both (or neither)."
+            )
+        if self.vlash_shared_obs and self.vlash_delta_max is None:
+            raise ValueError("vlash_shared_obs requires vlash_delta_max to be set.")
+
         model_transforms = ModelTransformFactory()(model_config)
+        if self.vlash_shared_obs:
+            # Must run LAST: after Normalize (between data_transforms and model_transforms)
+            # and PadStatesAndActions have been applied to the stacked branch states.
+            model_transforms = model_transforms.push(inputs=[transforms_vlash.SplitVlashBranches()])
 
         assert self.rlds_data_dir is not None, "Need to set rlds data dir for RLDS data loader."
 
@@ -738,6 +767,57 @@ _CONFIGS = [
         # predates state_cond, so state_proj/state_mlp_in/state_mlp_out (the three fresh AdaRMS
         # state modules from Task 1) are missing from it and are merged in from the freshly
         # initialized model instead -- see weight_loaders.CheckpointWeightLoader.missing_regex.
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/work/roboleon1295/checkpoints/pi05_droid_jointpos/params",
+            missing_regex=r"(state_proj|state_mlp_in|state_mlp_out)/.*",
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        num_train_steps=20_000,
+        batch_size=32,
+        num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
+    ),
+    # Shared-observation variant (Task 4, opt-in): identical to pi05_droid_jointpos_vlash
+    # except every batch element carries ALL `delta_max + 1` offset branches and the prefix
+    # forward pass is shared across them (Pi0.compute_loss_shared_obs, KV-broadcast). NOTE:
+    # each batch element now contains 4 branches, so the per-step effective number of
+    # (obs, action-chunk) pairs is 4x that of the unshared config at equal batch_size -- the
+    # Task 4 equivalence gate (2K-step run) must equalize by effective trajectories when
+    # comparing loss curves.
+    TrainConfig(
+        name="pi05_droid_jointpos_vlash_shared",
+        project_name="vlash-droid",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=15,
+            state_cond=True,
+            discrete_state_input=False,
+            vlash_shared_obs=True,
+        ),
+        data=RLDSDroidDataConfig(
+            repo_id="droid",
+            rlds_data_dir="gs://gresearch/robotics",
+            action_space=droid_rlds_dataset.DroidActionSpace.JOINT_POSITION,
+            vlash_delta_max=3,
+            vlash_shared_obs=True,
+            datasets=(
+                droid_rlds_dataset.RLDSDataset(
+                    name="droid",
+                    version="1.0.1",
+                    weight=1.0,
+                    filter_dict_path="gs://openpi-assets/droid/droid_sample_ranges_v1_0_1.json",
+                ),
+            ),
+            assets=AssetsConfig(
+                assets_dir="/work/roboleon1295/checkpoints/pi05_droid_jointpos/assets",
+                asset_id="droid",
+            ),
+        ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/work/roboleon1295/checkpoints/pi05_droid_jointpos/params",
             missing_regex=r"(state_proj|state_mlp_in|state_mlp_out)/.*",

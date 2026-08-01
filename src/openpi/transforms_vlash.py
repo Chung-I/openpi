@@ -69,6 +69,65 @@ def apply_offset(sample: DataDict, *, delta: int, action_horizon: int) -> DataDi
     return sample
 
 
+def apply_all_offsets(sample: DataDict, *, delta_max: int, action_horizon: int) -> DataDict:
+    """Emit EVERY offset branch instead of sampling one (shared-observation training).
+
+    Reuses `apply_offset` per branch. The input `state` (state_dim,) / `actions`
+    (action_horizon + delta_max, action_dim) are replaced by stacked per-branch arrays:
+    `state` becomes [(delta_max + 1), state_dim] and `actions` becomes
+    [(delta_max + 1), action_horizon, action_dim], where branch `delta` is exactly
+    `apply_offset(..., delta=delta)`'s output (branch 0 is the identity). The stacked layout
+    deliberately keeps the branches under the ORIGINAL keys so the downstream `Normalize` /
+    `PadStatesAndActions` transforms (which broadcast over leading dims) apply identically to
+    every branch; `SplitVlashBranches` later moves the stack to `vlash_states` and restores a
+    scalar-batch `state`.
+    """
+    state, actions = sample["state"], sample["actions"]
+    branches = [
+        apply_offset({"state": state, "actions": actions}, delta=delta, action_horizon=action_horizon)
+        for delta in range(delta_max + 1)
+    ]
+    sample["state"] = np.stack([branch["state"] for branch in branches], axis=0)
+    sample["actions"] = np.stack([branch["actions"] for branch in branches], axis=0)
+    return sample
+
+
+@dataclasses.dataclass(frozen=True)
+class VlashAllOffsets(DataTransformFn):
+    """Deterministic all-offsets variant of `VlashTemporalOffset` for shared-obs training.
+
+    Same pipeline position contract as `VlashTemporalOffset` (must run AFTER
+    `transforms.DeltaActions`); instead of sampling a single `delta`, it emits all
+    `delta_max + 1` branches stacked along a new leading axis. See `apply_all_offsets`.
+    """
+
+    delta_max: int
+    action_horizon: int
+
+    def __call__(self, data: DataDict) -> DataDict:
+        return apply_all_offsets(data, delta_max=self.delta_max, action_horizon=self.action_horizon)
+
+
+@dataclasses.dataclass(frozen=True)
+class SplitVlashBranches(DataTransformFn):
+    """Splits the stacked all-offset branches into model-facing fields.
+
+    Must run at the END of the model transforms -- after `Normalize` and
+    `PadStatesAndActions` have been applied to the stacked `state` -- so that every branch
+    state is normalized/padded identically. Moves the stacked states
+    [(delta_max + 1), state_dim] to `vlash_states` (consumed by
+    `Pi0.compute_loss_shared_obs` via `Observation.vlash_states`) and restores `state` to
+    branch 0 (the delta=0 identity branch, i.e. the actual current state). `actions` stay
+    stacked: the model trains on all branches at once.
+    """
+
+    def __call__(self, data: DataDict) -> DataDict:
+        stacked = data["state"]
+        data["vlash_states"] = stacked
+        data["state"] = stacked[0]
+        return data
+
+
 @dataclasses.dataclass(frozen=True)
 class VlashTemporalOffset(DataTransformFn):
     """Samples a random temporal offset and applies `apply_offset`.

@@ -63,11 +63,26 @@ def posemb_sincos(
     return jnp.concatenate([jnp.sin(sinusoid_input), jnp.cos(sinusoid_input)], axis=-1)
 
 
+def _broadcast_kv_cache(kv_cache: _gemma.KVCache, num_branches: int) -> _gemma.KVCache:
+    """Repeats each batch element's prefix KV `num_branches` times along the batch axis.
+
+    KVCache layout is [layers, batch, seq, kv_heads, head_dim]; `jnp.repeat` on axis 1 lays
+    the replicas out b-major (element i lands at rows i*num_branches ... i*num_branches +
+    num_branches - 1), matching the `(b k) -> b k` einops flattening used by the shared-obs
+    suffix batch. This is how the ONE prefix forward pass is shared across all temporal-offset
+    branches: the broadcast is differentiable, so prefix (PaliGemma) weights still receive
+    gradients from every branch through the cached keys/values.
+    """
+    cache_k, cache_v = kv_cache
+    return jnp.repeat(cache_k, num_branches, axis=1), jnp.repeat(cache_v, num_branches, axis=1)
+
+
 class Pi0(_model.BaseModel):
     def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.pi05 = config.pi05
         self.state_cond = config.state_cond
+        self.vlash_shared_obs = config.vlash_shared_obs
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
@@ -150,14 +165,30 @@ class Pi0(_model.BaseModel):
         at.Bool[at.Array, " s"],
         at.Float[at.Array, "b emb"] | None,
     ]:
+        return self._embed_suffix(obs.state, noisy_actions, timestep)
+
+    @at.typecheck
+    def _embed_suffix(
+        self,
+        state: at.Float[at.Array, "b st"],
+        noisy_actions: at.Float[at.Array, "b ah ad"],
+        timestep: at.Float[at.Array, " b"],
+    ) -> tuple[
+        at.Float[at.Array, "b s emb"],
+        at.Bool[at.Array, "b s"],
+        at.Bool[at.Array, " s"],
+        at.Float[at.Array, "b emb"] | None,
+    ]:
+        """State-array variant of `embed_suffix` so the shared-obs path can feed per-branch
+        rolled states (flattened to the batch axis) without constructing a fake Observation."""
         input_mask = []
         ar_mask = []
         tokens = []
         if not self.pi05:
             # add a single state token
-            state_token = self.state_proj(obs.state)[:, None, :]
+            state_token = self.state_proj(state)[:, None, :]
             tokens.append(state_token)
-            input_mask.append(jnp.ones((obs.state.shape[0], 1), dtype=jnp.bool_))
+            input_mask.append(jnp.ones((state.shape[0], 1), dtype=jnp.bool_))
             # image/language inputs do not attend to state or actions
             ar_mask += [True]
 
@@ -173,7 +204,7 @@ class Pi0(_model.BaseModel):
             action_expert_tokens = action_tokens
             adarms_cond = time_emb
             if self.state_cond:
-                state_emb = self.state_proj(obs.state)
+                state_emb = self.state_proj(state)
                 state_emb = nnx.swish(self.state_mlp_in(state_emb))
                 state_emb = nnx.swish(self.state_mlp_out(state_emb))
                 adarms_cond = adarms_cond + state_emb
@@ -197,14 +228,48 @@ class Pi0(_model.BaseModel):
 
     @override
     def compute_loss(
-        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        actions: _model.Actions,
+        *,
+        train: bool = False,
+        noise: at.Float[at.Array, "*b ah ad"] | None = None,
+        time: at.Float[at.Array, "*b"] | None = None,
     ) -> at.Float[at.Array, "*b ah"]:
+        """Flow-matching training loss.
+
+        When `config.vlash_shared_obs` is set, dispatches to `compute_loss_shared_obs`:
+        `actions` are then [b, k, ah, ad] (one action chunk per temporal-offset branch) and
+        `observation.vlash_states` must hold the per-branch rolled states [b, k, s]; the
+        returned loss is [b, k, ah], so the caller's `jnp.mean` averages over branches.
+
+        `noise`/`time` default to being sampled from `rng` and are injectable for tests that
+        need bit-identical flow-matching inputs across separate calls.
+        """
+        if self.vlash_shared_obs:
+            return self.compute_loss_shared_obs(rng, observation, actions, train=train, noise=noise, time=time)
+        return self._compute_loss_single(rng, observation, actions, train=train, noise=noise, time=time)
+
+    def _compute_loss_single(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        actions: _model.Actions,
+        *,
+        train: bool = False,
+        noise: at.Float[at.Array, "*b ah ad"] | None = None,
+        time: at.Float[at.Array, "*b"] | None = None,
+    ) -> at.Float[at.Array, "*b ah"]:
+        """Stock (single-branch) loss: one observation, one action chunk per batch element."""
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
         batch_shape = actions.shape[:-2]
-        noise = jax.random.normal(noise_rng, actions.shape)
-        time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
+        if noise is None:
+            noise = jax.random.normal(noise_rng, actions.shape)
+        if time is None:
+            time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
         time_expanded = time[..., None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
@@ -220,6 +285,86 @@ class Pi0(_model.BaseModel):
             [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+
+        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+
+    def compute_loss_shared_obs(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        actions: at.Float[at.Array, "b k ah ad"],
+        *,
+        train: bool = False,
+        noise: at.Float[at.Array, "b k ah ad"] | None = None,
+        time: at.Float[at.Array, "b k"] | None = None,
+    ) -> at.Float[at.Array, "b k ah"]:
+        """Shared-observation loss over all `k = delta_max + 1` temporal-offset branches.
+
+        KV-broadcast design: the (images + language) prefix is embedded and run through the
+        transformer ONCE at batch size `b` -- exactly as in `sample_actions`'s prefill -- and
+        its KV cache is broadcast across the `(b k)`-flattened suffix batch. Each branch's
+        suffix carries its own noisy action chunk and its own adarms_cond computed from that
+        branch's rolled state (`observation.vlash_states[:, k]`), which is exactly the plain
+        per-sequence cond path in gemma.py -- no per-token-group cond surgery needed. Every
+        suffix query attends to its own batch row only (prefix replica + itself), so branches
+        are isolated by construction; the two-pass prefix/suffix split is mathematically
+        identical to the stock single-pass forward because prefix tokens never attend to the
+        suffix. Loss is per-branch [b, k, ah]; the training caller's `jnp.mean` averages over
+        branches.
+        """
+        if observation.vlash_states is None:
+            raise ValueError(
+                "compute_loss_shared_obs requires observation.vlash_states (per-branch rolled states "
+                "[b, k, s]); is transforms_vlash.SplitVlashBranches in the model transforms?"
+            )
+        preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
+        observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
+
+        batch_size, num_branches = actions.shape[:2]
+        if noise is None:
+            noise = jax.random.normal(noise_rng, actions.shape)
+        if time is None:
+            time = jax.random.beta(time_rng, 1.5, 1, (batch_size, num_branches)) * 0.999 + 0.001
+        time_expanded = time[..., None, None]
+        x_t = time_expanded * noise + (1 - time_expanded) * actions
+        u_t = noise - actions
+
+        # 1) shared prefix: ONE forward pass at batch size b, filling the KV cache (same
+        # structure as sample_actions' prefill). Gradients flow into the prefix weights
+        # through the cached keys/values.
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=prefix_positions)
+
+        # 2) per-branch suffix at batch size b*k; adarms_cond is per-branch via the batch dim.
+        flat_states = einops.rearrange(observation.vlash_states, "b k s -> (b k) s")
+        flat_x_t = einops.rearrange(x_t, "b k ah ad -> (b k) ah ad")
+        flat_time = einops.rearrange(time, "b k -> (b k)")
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self._embed_suffix(flat_states, flat_x_t, flat_time)
+
+        # 3) broadcast the prefix KV/mask across branches (b-major, matching the flattening).
+        kv_cache = _broadcast_kv_cache(kv_cache, num_branches)
+        prefix_mask_rep = jnp.repeat(prefix_mask, num_branches, axis=0)
+
+        # `suffix_attn_mask` is (b*k, suffix_len, suffix_len): how suffix tokens attend to
+        # each other within their own branch row.
+        suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+        # `prefix_attn_mask` is (b*k, suffix_len, prefix_len): suffix tokens see their own
+        # batch element's (shared) prefix.
+        prefix_attn_mask = einops.repeat(prefix_mask_rep, "bk p -> bk s p", s=suffix_tokens.shape[1])
+        full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
+        positions = jnp.sum(prefix_mask_rep, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+
+        (_, suffix_out), _ = self.PaliGemma.llm(
+            [None, suffix_tokens],
+            mask=full_attn_mask,
+            positions=positions,
+            kv_cache=kv_cache,
+            adarms_cond=[None, adarms_cond],
+        )
+        v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+        v_t = einops.rearrange(v_t, "(b k) ah ad -> b k ah ad", k=num_branches)
 
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
 

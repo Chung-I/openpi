@@ -32,6 +32,14 @@ class Pi0Config(_model.BaseModelConfig):
     # When True (pi05 only), condition adaRMS on robot state (in addition to the flow-matching
     # timestep) via a fresh state_proj/state_mlp_in/state_mlp_out tower. Requires pi05=True.
     state_cond: bool = False
+    # VLASH shared-observation training (opt-in): each batch element carries all
+    # `delta_max + 1` temporal-offset branches (Observation.vlash_states [b, k, s] plus
+    # stacked actions [b, k, ah, ad]). The (images + language) prefix is computed ONCE per
+    # batch element and its KV cache is broadcast across the branch-replicated suffix batch;
+    # each branch gets its own adarms_cond from its rolled state. Requires pi05=True and
+    # state_cond=True (per-branch conditioning is the point of sharing the observation).
+    # See Pi0.compute_loss_shared_obs.
+    vlash_shared_obs: bool = False
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
@@ -44,6 +52,11 @@ class Pi0Config(_model.BaseModelConfig):
             object.__setattr__(self, "discrete_state_input", self.pi05)
         if self.state_cond and not self.pi05:
             raise ValueError("state_cond=True requires pi05=True (AdaRMS state conditioning is a pi05-only feature).")
+        if self.vlash_shared_obs and not (self.pi05 and self.state_cond):
+            raise ValueError(
+                "vlash_shared_obs=True requires pi05=True and state_cond=True (shared-obs training conditions "
+                "each temporal-offset branch on its own rolled state via AdaRMS)."
+            )
         if self.pytorch_compile_mode is not None:
             assert self.pytorch_compile_mode in [
                 "default",

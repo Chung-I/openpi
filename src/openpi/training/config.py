@@ -724,6 +724,41 @@ _CONFIGS = [
             ),
         ),
     ),
+    TrainConfig(
+        # Joint-position variant of pi0.5-DROID for simulated eval (e.g. RoboLab).
+        # The original pi05_droid checkpoint outputs joint *velocity* actions, which
+        # openpi documents as incompatible with sim. This config applies AbsoluteActions
+        # to the joint dims (mask 7, -1: joints absolute, gripper untouched) so the model
+        # output is applied as absolute joint-position targets. Serve with the matching
+        # checkpoint: gs://openpi-assets-simeval/pi05_droid_jointpos (mirrored locally on
+        # nano4 at /work/roboleon1295/checkpoints/pi05_droid_jointpos).
+        #
+        # Ported onto vlash-droid in Task 6 (serving smoke): this TrainConfig is what
+        # `serve_policy.py --policy.config=pi05_droid_jointpos` needs to serve the RELEASED
+        # (non-vlash) baseline checkpoint. It previously existed only inline/adjacent on
+        # other branches (chungyi/pi05-layer-truncation's `_truncation_arm` builds its own
+        # RLDS-based training configs named `pi05_droid_jointpos_trunc*`, not this exact
+        # name; the plain "pi05_droid_jointpos" serving config traces to the
+        # chungyi/wip/nano4-mem-cluster-work snapshot). Deliberately a SimpleDataConfig
+        # (no RLDS machinery) since serving never trains -- create_trained_policy loads
+        # norm stats straight from `checkpoint_dir / "assets"`, so `assets_dir` is unused
+        # for serving; only `asset_id="droid"` matters, matching Task 3's jointpos assets.
+        name="pi05_droid_jointpos",
+        model=pi0_config.Pi0Config(action_horizon=15, pi05=True),
+        data=SimpleDataConfig(
+            assets=AssetsConfig(asset_id="droid"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[droid_policy.DroidInputs(model_type=ModelType.PI05)],
+                outputs=[
+                    _transforms.AbsoluteActions(_transforms.make_bool_mask(7, -1)),
+                    droid_policy.DroidOutputs(),
+                ],
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+    ),
     #
     # VLASH-on-DROID configs.
     #

@@ -81,14 +81,24 @@ class IterableTransformedDataset(IterableDataset[T_co]):
                 # individual samples and apply the transform to each sample individually.
                 batch_size = next(v.shape[0] for v in sample.values())
 
-                # Split batch into individual samples using tree_map. `np.array(...)` forces a
-                # copy rather than a view: RLDS/tf.data batches arrive via `EagerTensor.numpy()`,
-                # which (depending on TF version/op history) can hand back a read-only ndarray to
-                # avoid copying TF's internal buffer. In-place transforms downstream (e.g.
-                # DeltaActions) mutate their input, which raises `ValueError: output array is
-                # read-only` on a bare view/slice -- see docs/superpowers/plans/
-                # 2026-08-01-vlash-droid-notes.md (Task 3 section) for the full trace.
-                individual_samples = [jax.tree.map(lambda x: np.array(x[i]), sample) for i in range(batch_size)]  # noqa: B023
+                # Split batch into individual samples using tree_map. RLDS/tf.data batches
+                # arrive via `EagerTensor.numpy()`, which (depending on TF version/op history)
+                # can hand back a read-only ndarray to avoid copying TF's internal buffer.
+                # In-place transforms downstream (e.g. DeltaActions) mutate "actions", which
+                # raises `ValueError: output array is read-only` on a bare view/slice -- see
+                # docs/superpowers/plans/2026-08-01-vlash-droid-notes.md (Task 3 section) for the
+                # full trace. `.copy()` forces a writable copy for ndarray leaves only: a naive
+                # `np.array(x[i])` on EVERY leaf also wraps scalar bytes/str leaves (e.g.
+                # "prompt") into a 0-d ndarray, which breaks `isinstance(prompt, bytes)` checks
+                # downstream (droid_policy.DroidInputs) that rely on getting the raw Python
+                # bytes object, not an ndarray -- do not "simplify" this back to np.array(x[i]).
+                def _writable_leaf(x, i):
+                    v = x[i]
+                    return v.copy() if isinstance(v, np.ndarray) else v
+
+                individual_samples = [
+                    jax.tree.map(lambda x, i=i: _writable_leaf(x, i), sample) for i in range(batch_size)
+                ]
 
                 # Transform each sample
                 transformed = [self._transform(s) for s in individual_samples]

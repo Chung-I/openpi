@@ -810,6 +810,76 @@ checkpoint-rotation OOM mechanism at 190G/1-GPU scale -- strong grounds for the 
 `--mem=800G`. Both gate checkpoints (`gate_a`, `gate_b`/`gate_b2`) deleted after extraction to
 restore quota (221G free after final cleanup, before the headline submission).
 
+### Gate statistical check
+
+A reviewer flagged that the 15.6% raw-loss gap above was attributed to correlated-branch
+sampling variance qualitatively, with no CI. Redid this rigorously via the wandb API
+(`/home/chungyili/Codes/vlash/.venv/bin/python`, script kept at
+`/tmp/claude-1000/-home-chungyili-Codes-vlash/098bccb5-88e8-493a-ba22-61226b7083e9/scratchpad/gate_ci.py`,
+not committed).
+
+**Run-id correction:** the run ids initially supplied for this check (`yeaoms0d` for arm A,
+`x9o9qi1v` for arm B) turned out to only be half right. `yeaoms0d` (`gate_a`) is correct. But
+`x9o9qi1v` is an unrelated, later, failed HEADLINE attempt (`pi05_droid_jointpos_vlash_shared`,
+0 loss rows logged, crashed at step 0) -- confirmed by enumerating every run in the
+`leon129506/vlash-droid` project. The actual arm-B gate run behind the numbers quoted in Step 2
+above is **`gate_b2`** (id `pj1e6zpd`, job 228588) -- `gate_b` (id `tppytyn4`, job 228564) is the
+first arm-B attempt that crashed instantly on the Step-1 `vlash_shared_obs` data/model-mismatch
+bug and logged 0 rows, which is exactly why it was fixed and resubmitted as `gate_b2`. All
+numbers below use `yeaoms0d` (A) vs `pj1e6zpd` (B).
+
+**Method:** pulled `loss`, `param_norm`, `_step` via `run.scan_history`, restricted to the
+largest common step window with step >= 300 (both arms log every 20 steps; common range
+300-1960, n=84 paired log points -- wider than Step 2's original 300-1000/n=36 window since
+both gate jobs' training actually ran to ~step 1980-2000 before their tail-end checkpoint-save
+OOM). Computed per-arm mean/std, the observed relative gap of means `(B_mean-A_mean)/A_mean`,
+and two complementary autocorrelation-aware checks: (1) a moving-block bootstrap (block length
+~50 training steps = 2 log-points/block, since the log interval is 20 steps, 10k resamples) 95%
+CI on the relative gap; (2) a literal "gap of block-means" test -- collapse the series into 42
+non-overlapping ~50-step blocks, compute each block's per-arm mean, take the relative gap of
+each block-pair, and report the resulting distribution's mean/std, an i.i.d. bootstrap 95% CI,
+and a one-sample t-test against 0.
+
+**Loss** (n=84, steps 300-1960): `A_mean=0.026562 (std=0.001626)`, `B_mean=0.030546
+(std=0.002396)`. Observed relative gap **+15.00%** (consistent with Step 2's originally-quoted
+15.6%, over a slightly wider window). Moving-block bootstrap 95% CI: **[13.14%, 16.99%]** --
+excludes 0. Gap-of-block-means test (42 blocks): mean **15.10%** (std 6.49% across blocks),
+i.i.d. bootstrap 95% CI **[13.17%, 17.03%]**, one-sample t=15.08, bootstrap-null two-sided
+**p < 0.0001**. Zero is excluded by every method tried, by a wide margin -- the block-level gap
+is not just "usually positive," it is positive in essentially every ~50-step block across the
+full 1660-step common window.
+
+**param_norm** (same window): `A_mean=1834.277998 (std=0.576098)`, `B_mean=1834.259612
+(std=0.560538)`. Observed relative gap **-0.0010%**, bootstrap 95% CI **[-0.0013%, -0.0008%]**
+-- technically also excludes exactly 0 (84-2000 nearly-noiseless log points give absurd
+precision), but the magnitude is ~150x smaller than the loss gap and matches Step 2's
+qualitative "<0.001% relative gap" claim almost exactly. This is the practically-relevant
+confirmation that the two arms' actual weight trajectories are indistinguishable.
+
+**Verdict: the 15% raw-loss gap is NOT consistent with zero true gap explained by noise
+alone** -- flagging this loudly since the headline run (job 228672, currently running) already
+uses the shared-obs config this gap was measured on. Every resampling method that respects the
+~50-step autocorrelation scale (moving-block bootstrap on the raw series, and the independent
+gap-of-block-means test) puts the true relative gap at a stable ~13-17%, nowhere near 0; this
+contradicts Step 2's original qualitative read that the raw-loss gap was "noise from a modest
+common sample... not a real training-dynamics divergence." What the data DOES support, and what
+tempers how alarming this is: `param_norm` -- the actual weight trajectory, an integrated
+signal immune to any single scalar's estimation noise -- shows a genuinely negligible gap
+(~0.001%, two orders of magnitude below the loss gap's CI), and Task 4's own unit test already
+proves `compute_loss_shared_obs` is exact-math-equivalent to per-branch loss given IDENTICAL
+inputs. So this is not evidence of a computational bug in the shared-obs loss, and not evidence
+the two arms are optimizing to different points in weight space. It IS evidence that the raw
+scalar `loss` arm B reports is systematically, not just noisily, higher than arm A's by
+~13-17% throughout training past warmup -- most likely a real consequence of arm B's batches
+containing 4 correlated branches of only 8 underlying trajectories (vs. A's 32 fully
+independent examples), which can shift what the per-step average of a nonlinear loss converges
+to even when the underlying model updates track together. Practical upshot: this specific
+raw `loss` scalar is not a like-for-like comparison metric between the shared and non-shared
+arms and should not be used as one (Step 2's own concern #3 already said as much for the
+headline run's monitoring); anyone using this run's raw loss level as evidence of anything
+beyond within-arm trend should be aware the ~15% level offset versus the non-shared arm is real,
+not sampling noise.
+
 ### Step 3 — Headline run
 
 **Status: HEALTHY, all 5 gates PASSED.** Job **228672** (after two earlier crashes, both fixed

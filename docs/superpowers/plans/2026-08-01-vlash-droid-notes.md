@@ -364,3 +364,126 @@ $ sacct -j 228203 --format=JobID,State,ExitCode,Elapsed -n
 3. `vlash_shared_obs: bool = False` (mentioned in the Task 3 brief's "Interfaces" section as a
    forward-looking flag) and the LoRA variant via `freeze_filter` were explicitly out of scope
    for this task (deferred to Task 5 per the brief) and were not added.
+
+## Task 4 — Opt-in shared-observation training
+
+**Status: implemented + unit-tested.** The 2K-step equivalence gate (brief Step 4) is
+deliberately NOT run here — it needs nano4 GPU-hours and Task 7 decides; nothing below claims
+training-scale validation.
+
+### Design decision: KV-broadcast, NOT single-sequence packing
+
+The brief's Step 2 fork was decided in favor of **(b) KV-broadcast**: compute the shared
+(images + language) prefix ONCE at batch size `b`, filling the KV cache exactly like
+`sample_actions`' prefill, then run the suffix at batch size `b·(Δmax+1)` — one row per
+temporal-offset branch — against a branch-replicated copy of that cache
+(`pi0._broadcast_kv_cache`, a differentiable `jnp.repeat` on the cache's batch axis, so
+prefix/PaliGemma weights still receive gradients from every branch through the cached K/V).
+
+Rationale, from reading `gemma.py` before deciding:
+
+1. **adarms_cond is structurally per-sequence in openpi's gemma.** `RMSNorm.__call__` computes
+   `modulation = Dense(cond)` and applies `modulation[:, None, :]` — ONE `[b, emb]` vector
+   broadcast over every token of that expert's sequence; `Module.__call__` types it
+   `Sequence[Float[Array, "b _d"]]` and `nn.scan` broadcasts it to all layers. True packing
+   (all Δmax+1 branches in one suffix sequence) needs a *different cond per token group*,
+   i.e. surgery in `RMSNorm` (per-token modulation + gate), `Block` (gate shapes in
+   `_gated_residual`), and `Module` (annotations), mirrored in the vlash torch reference's
+   custom `forward_shared_observation` layer method — invasive in exactly the way the brief
+   warned about.
+2. **KV-broadcast makes per-branch cond the *natural batch dimension*** — `embed_suffix`'s
+   state-cond path (`state_proj`/`state_mlp_in`/`state_mlp_out` → `adarms_cond`) is reused
+   verbatim on the `(b k)`-flattened states with zero gemma changes.
+3. **Packing also needs custom mask + position surgery** — branch-vs-branch isolation is not
+   expressible with `make_attn_mask`'s cumulative `mask_ar` scheme (blocks attend to *all*
+   previous blocks), so a bespoke block-sparse mask builder would be required anyway.
+4. **The two-pass split is mathematically identical to the stock one-pass forward** because
+   prefix tokens never attend to the suffix (suffix `ar_mask` starts with True): the prefix
+   K/V are computed from identical inputs/weights either way. And KV-broadcast is actually
+   *cheaper* in attention FLOPs than packing, which recomputes prefix-x-prefix attention
+   inside the longer packed sequence.
+5. **Same prefix-compute saving as packing:** the expensive parts — 3×SigLIP forwards and the
+   PaliGemma-expert forward over ~800 prefix tokens — happen once per batch element, not once
+   per branch. The suffix (Δmax+1 rows × H=15 action tokens through the 300M expert) is the
+   only replicated compute. Memory cost of the broadcast cache (~K× prefix KV) is the price;
+   acceptable (KV is `num_kv_heads=1`).
+
+### What was added
+
+- **`Pi0Config.vlash_shared_obs: bool = False`** — requires `pi05=True` AND `state_cond=True`
+  (`__post_init__` raises otherwise; per-branch state conditioning is the point).
+- **Data path** (`transforms_vlash.py`): `apply_all_offsets`/`VlashAllOffsets` emit ALL
+  Δmax+1 branches stacked under the ORIGINAL keys — `state [(Δmax+1), 8]`,
+  `actions [(Δmax+1), H, 8]` — reusing `apply_offset` per branch (branch 0 is the identity).
+  Keeping the stack under `state`/`actions` is deliberate: `Normalize` (which runs between
+  data_transforms and model_transforms) and `PadStatesAndActions` broadcast over leading dims,
+  so every branch is normalized/padded *identically* with zero changes to those transforms.
+  `SplitVlashBranches`, appended as the LAST model transform, then moves the stack to
+  `vlash_states` and restores `state` to branch 0. (Alternative rejected: emitting a separate
+  `vlash_states` key straight from the offset transform — it would silently *skip
+  normalization*, since norm stats are keyed `state`/`actions`.)
+- **`Observation.vlash_states: [*b k s] | None = None`** (model.py) + `from_dict`/
+  `preprocess_observation` pass-through. A separate optional field (rather than reshaping
+  `state`) because jaxtyping's dataclass check binds `*b` jointly across fields — `state
+  [b, k, s]` with images `[b, h, w, c]` fails typechecking at construction.
+- **`Pi0.compute_loss` dispatch**: flag on → `compute_loss_shared_obs` (loss `[b, k, ah]`;
+  train.py's `jnp.mean` then averages over branches = "loss = mean over branches"); flag off →
+  `_compute_loss_single` (the stock body, unchanged math). Both gained injectable
+  `noise=`/`time=` kwargs (mirrors the torch reference API) so tests can compare paths with
+  bit-identical flow-matching inputs. `embed_suffix` refactored to delegate to
+  `_embed_suffix(state, x_t, t)` so the shared path can feed flattened branch states without
+  constructing a fake Observation (which would fail typechecking).
+- **Config**: `RLDSDroidDataConfig.vlash_shared_obs` (validates agreement with the model flag
+  in both directions, and requires `vlash_delta_max`); new TrainConfig
+  `pi05_droid_jointpos_vlash_shared` = the Task 3 config + both flags. NOTE for Task 7: at
+  equal `batch_size`, the shared config sees 4× the (obs, action-chunk) pairs per step — the
+  gate must equalize by effective trajectories.
+- `inputs_spec` was deliberately NOT extended for shared-obs shapes: it feeds only
+  `FakeDataset` (debug configs) and is unused by the real RLDS train path; extending it would
+  require the model config to know Δmax, which is a data-side knob.
+
+### Tests (`tests/test_shared_obs.py`, 14 tests, all pass on the local 5090)
+
+- Transform: all-branches emission matches per-δ `apply_offset`, input arrays not mutated,
+  `SplitVlashBranches` semantics; config-flag validation (×3).
+- **Branch isolation**: perturbing branch 1's state+actions leaves branch 0's loss unchanged
+  (atol 1e-6) while branch 1's changes; plus a state-only perturbation test proving the rolled
+  state actually reaches the per-branch adarms_cond.
+- **Equivalence (THE key test)**: `compute_loss_shared_obs` per-branch losses match
+  `_compute_loss_single` run per branch with identical weights/noise/time (rtol 1e-4).
+- **KV-broadcast**: `_broadcast_kv_cache` rows identical across branch replicas (b-major
+  layout pinned); `embed_prefix` called exactly once, at batch size B not B·K (mock spy).
+- Dispatch test (`compute_loss` routes to shared path under the flag) + missing-`vlash_states`
+  error + loss-shape/finiteness.
+
+Two test-only gotchas worth remembering:
+
+1. **adaLN-zero**: gemma's adaRMS modulation Dense is zero-initialized, so on a freshly
+   initialized model the cond pathway is a numerical NO-OP — state perturbations cannot move
+   the loss at init. The model fixture perturbs every `Dense_0` param (the modulation layers)
+   so the cond pathway is actually exercised. Any future "state changes the loss" test at
+   fresh init will spuriously fail without this.
+2. **TF32**: on the 5090, JAX lowers f32 matmuls to TF32 (~1e-3 rel error), which swamps the
+   equivalence tolerance because the two paths contract in different orders. The test module
+   sets `jax_default_matmul_precision=highest`.
+
+Regression: `tests/test_state_cond.py` (4), `tests/test_vlash_offsets.py` (3),
+`src/openpi/training/config_test.py` (11 + 4 new), `src/openpi/models/pi0_test.py` (4), and
+full-size `model_test.py::test_pi0_model` (stock compute_loss + sample_actions through the
+refactor) all pass. Ruff clean on all touched files.
+
+### Concerns / follow-ups
+
+1. **The 2K-step equivalence gate is still open** (Step 4; Task 7 decides). Unit equivalence
+   is exact-math equivalence per branch — it does NOT validate optimization-scale effects
+   (e.g. the 4× effective-pairs-per-step correlation structure of shared batches).
+2. **Memory**: the broadcast prefix KV is K× the stock cache; with bf16, depth 18, ~970 prefix
+   tokens, B=32, K=4 that is ~2-3 GB extra activation memory (plus its gradient residency) —
+   fine on H100s, but re-check when sizing the real run's per-GPU batch.
+3. `compute_norm_stats.py` was not exercised against the all-offsets pipeline; the shared
+   config reuses the existing jointpos norm stats (same as Task 3), so this only matters if
+   stats are ever recomputed with `vlash_shared_obs=True` (the stacked `state` would then feed
+   the stats accumulator with an extra leading dim).
+4. Other DataConfig factories ignore `model_config.vlash_shared_obs`; using a shared-obs model
+   with a non-RLDS data config fails at train time with the informative
+   "requires observation.vlash_states" ValueError rather than at config time.

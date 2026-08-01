@@ -802,9 +802,105 @@ crashed instantly on the Step 1 bug above and was fixed+resubmitted) -- both see
   `/work` free: 274G (Task 0) -> 222G (gate start) -> 156G (mid-gate, both arms'
   checkpoints on disk) -> 207G (after cleanup, before headline quota check).
 
+**Update (post-write-up):** arm A's gate job (228562) was left RUNNING above; it has since
+finished -- `sacct` shows `OUT_OF_ME+` (OOM) at its own final-step checkpoint save, the EXACT
+same failure mode as arm B (training itself reached step 1980+ with healthy, closely-tracking
+values before the tail-end save crashed). Two independent confirmations of the same
+checkpoint-rotation OOM mechanism at 190G/1-GPU scale -- strong grounds for the headline run's
+`--mem=800G`. Both gate checkpoints (`gate_a`, `gate_b`/`gate_b2`) deleted after extraction to
+restore quota (221G free after final cleanup, before the headline submission).
+
 ### Step 3 — Headline run
 
-See `scripts/nchc/vlash_droid_train.sbatch` (new) for the full sbatch (4xH200, `--mem=800G`,
-30K steps, `--keep-period=40000`, quota preflight check requiring >100G free, mail
-notifications, `pi05_droid_jointpos_vlash_shared` batch 8 default per the PASS verdict above).
-Submission + health-check results recorded in `task-7-report.md`.
+**Status: HEALTHY, all 5 gates PASSED.** Job **228672** (after two earlier crashes, both fixed
+live -- see below), config `pi05_droid_jointpos_vlash_shared`, batch 8 (2/GPU x 4 GPUs), 30,000
+steps, node `25a-hgpn001`. wandb: <https://wandb.ai/leon129506/vlash-droid/runs/uczeu5ji>.
+
+#### Two real bugs found and fixed live, both general (not vlash-specific), both only exercised now because this is the FIRST vlash-droid job ever run on >1 GPU
+
+1. **Job 228639 (first attempt) crashed instantly** (before model init) with `NCCL operation
+   ncclGroupEnd() failed: unhandled cuda error ... Cuda failure 'out of memory'`. Root cause:
+   `scripts/train.py`'s Step-0 wandb sanity-check indexed the first batch's STILL-SHARDED
+   `jax.Array` images directly (`np.array(img[i])` for `i in range(5)`), which lowers to an
+   NCCL gather across the sharded batch axis; on a real multi-GPU allocation this failed,
+   apparently because JAX's preallocated arena left insufficient headroom for NCCL's own
+   buffers at first use. Fixed in `scripts/train.py`: call `jax.device_get(batch[0].images)`
+   FIRST so all subsequent indexing is plain host-side numpy with no device communication.
+   Verified locally against the `debug` FakeDataConfig (single device): identical Step 0/1
+   loss values before/after. Commit `a5162ac`.
+2. **Job 228648 (retry) crashed in `init_train_state`** with `RESOURCE_EXHAUSTED: Out of
+   memory while trying to allocate 2106589184 bytes` on `GPU_0_bfc`. Root cause:
+   `TrainConfig.fsdp_devices` defaults to `1` (no FSDP), so `sharding.fsdp_sharding` replicates
+   the ENTIRE train_state (params + Adam mu/nu + EMA -- full finetune, no `freeze_filter`, so
+   ALL ~2.3B params carry full optimizer state) onto every one of the 4 GPUs instead of
+   sharding it -- 4x more per-GPU memory than a 4-GPU job needs, and apparently just barely
+   over budget at model-init time. Fixed by adding `--fsdp-devices=4` to the headline sbatch.
+   Confirmed via `sharding.py`: `DATA_AXIS = (BATCH_AXIS, FSDP_AXIS)` means the training BATCH
+   is always split across all devices regardless of this flag (per-GPU batch stays 2 either
+   way) -- `fsdp_devices` only changes whether the model/optimizer state is ALSO sharded across
+   those same 4 GPUs (mesh shape `(1, 4)` instead of `(4, 1)`). Commit `c106206`.
+3. **Job 228672 (third attempt): clean.** Passed both prior crash points; reached Step 0
+   within ~40s of `init_train_state` completing.
+
+#### Health gates (first ~40 min of real wall-clock after final submission)
+
+1. **Loss decreasing**: yes -- `Step 0: loss=2.7001` -> `Step 100: loss=1.4148` ->
+   `Step 200: loss=0.0653` -> plateaus ~0.03-0.037 by step 300+, closely matching BOTH gate
+   arms' trajectories at the same steps (e.g. step 400: headline `loss=0.0330,
+   param_norm=1833.5739` vs gate arm B's step 400 `loss=0.0333, param_norm=1833.5824` --
+   nearly identical). `param_norm` at step 0 (`1833.5470`) matches the gate arms' step-0 value
+   exactly.
+2. **Offset histogram spread across {0,1,2,3}**: N/A in the random-sampling sense for this
+   arm -- the shared config's data pipeline uses `VlashAllOffsets` (deterministic: every
+   single example carries all 4 delta branches, not a per-example random draw), so there is
+   no "first N sampled offsets" log line to check (that mechanism belongs to
+   `VlashTemporalOffset`, the non-shared arm's transform). Confirmed structurally instead: the
+   equivalence-gate job's `data_config` log line for the shared config lists
+   `VlashAllOffsets(delta_max=3, action_horizon=15)` in the transform chain (Task 4's own unit
+   tests already prove it stacks all 4 branches every time).
+3. **`val_loss/delta_*` logging**: yes, confirmed at step 0
+   (`delta_0=1.8565, delta_1=3.6071, delta_2=1.7716, delta_3=2.6819`) and step 1000
+   (`delta_0=0.0122, delta_1=0.0334, delta_2=0.0186, delta_3=0.0287`) -- notably, by step 1000
+   the four deltas are CLEARLY SEPARATED (delta_0's loss is ~2-3x lower than delta_1/delta_3),
+   an early positive signal that the AdaRMS state-conditioning channel is doing real
+   delta-dependent work, not just a no-op.
+4. **s/step + walltime projection**: steady-state rate **4.5-4.6 it/s (~0.22s/step)**,
+   `remaining: ~1:46:xx` (tqdm's own projection) for the full 30,000 steps -- i.e. **~1h48m
+   total, far under the 20h target** (was expecting single-digit-hours based on the gate's
+   1-GPU/0.42s-per-step measurement for the shared arm scaled by ~4x parallelism minus
+   communication overhead; actual is even faster than that back-of-envelope estimate).
+5. **Quota stable**: `/work` free went 221G (pre-submission) -> 210G (mid checkpoint-save) ->
+   **180G (after the step-1000 checkpoint finalized)** -- the drop matches the measured 42G
+   checkpoint size almost exactly (221-180=41G), consistent and NOT runaway; comfortably above
+   the 100G floor.
+
+#### The step-1000 checkpoint rotation was the real first-time stress test of `--mem=800G`
+
+Training briefly stalled for ~5 minutes at the step-1000 save (tqdm's progress line stopped
+advancing, checkpoint dir stuck at 12G/`params` only) before the `train_state` item's write
+resumed and completed cleanly (`Finished saving checkpoint (finalized tmp dir)`, final size
+**42G**, matching the gate measurement exactly). Job never crashed, training resumed
+immediately after at the same steady-state 4.5-4.6 it/s rate. This is the first real evidence
+that `--mem=800G` (not just the gate's `--mem=190G` extrapolation) survives an actual
+checkpoint rotation on 4 GPUs with FSDP -- the earlier stall is presumably the same kind of
+transient pressure that (much more mildly) delayed arm A's gate-job save, not a sign of
+imminent OOM at this much larger `--mem`.
+
+#### Concerns for the controller monitoring the rest of the 30K-step run
+
+1. Two subsequent checkpoint rotations (steps 2000, 3000, ...) haven't been observed yet --
+   the step-1000 one succeeded but took longer than expected; worth spot-checking that later
+   rotations complete within a similar timeframe and don't trend towards the OOM failure mode
+   both gate jobs hit.
+2. `/work` quota: 180G free after the first checkpoint. With `--keep-period=40000` only ONE
+   checkpoint is retained at steady state (~42G), so barring anything else landing on `/work`,
+   this should stay roughly flat around 180G rather than continuing to decline -- worth
+   spot-checking.
+3. The raw `loss` scalar's ~15.6% gap between arms observed in the equivalence gate (Task 7
+   Step 2) is a property of the shared arm regardless of scale -- the headline run's own loss
+   curve should still be judged by its shape/trend and the `val_loss/delta_*` separation, not
+   by comparing its absolute level to some external reference.
+4. Not exercised yet at all: the FULL 30,000-step run, later-stage `val_loss/delta_*` behavior
+   (whether the delta separation grows, shrinks, or stays stable as training continues), and
+   final checkpoint completeness. Left running per the brief; monitoring is the controller's
+   responsibility from here.

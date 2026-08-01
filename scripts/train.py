@@ -228,10 +228,17 @@ def main(config: _config.TrainConfig):
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
-    # Log images from first batch to sanity check.
+    # Log images from first batch to sanity check. Bring the (possibly multi-device-sharded)
+    # image arrays to host FIRST via jax.device_get -- fancy-indexing a still-sharded
+    # jax.Array directly (img[i] on the device array) makes XLA lower per-index access to an
+    # NCCL gather, which failed with a CUDA OOM the first time this ran on a real multi-GPU
+    # allocation (this debug-only sanity-check path had never been exercised on >1 GPU before
+    # -- VLASH-on-DROID Task 7's headline run, job 228639). Once the images are plain numpy
+    # arrays on host, indexing needs no device communication at all.
+    host_images = jax.device_get(batch[0].images)
     images_to_log = [
-        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
-        for i in range(min(5, len(next(iter(batch[0].images.values())))))
+        wandb.Image(np.concatenate([img[i] for img in host_images.values()], axis=1))
+        for i in range(min(5, len(next(iter(host_images.values())))))
     ]
     wandb.log({"camera_views": images_to_log}, step=0)
 

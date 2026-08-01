@@ -81,8 +81,14 @@ class IterableTransformedDataset(IterableDataset[T_co]):
                 # individual samples and apply the transform to each sample individually.
                 batch_size = next(v.shape[0] for v in sample.values())
 
-                # Split batch into individual samples using tree_map
-                individual_samples = [jax.tree.map(lambda x: x[i], sample) for i in range(batch_size)]  # noqa: B023
+                # Split batch into individual samples using tree_map. `np.array(...)` forces a
+                # copy rather than a view: RLDS/tf.data batches arrive via `EagerTensor.numpy()`,
+                # which (depending on TF version/op history) can hand back a read-only ndarray to
+                # avoid copying TF's internal buffer. In-place transforms downstream (e.g.
+                # DeltaActions) mutate their input, which raises `ValueError: output array is
+                # read-only` on a bare view/slice -- see docs/superpowers/plans/
+                # 2026-08-01-vlash-droid-notes.md (Task 3 section) for the full trace.
+                individual_samples = [jax.tree.map(lambda x: np.array(x[i]), sample) for i in range(batch_size)]  # noqa: B023
 
                 # Transform each sample
                 transformed = [self._transform(s) for s in individual_samples]

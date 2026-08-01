@@ -21,6 +21,7 @@ import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.polaris_config as polaris_config
@@ -831,6 +832,72 @@ _CONFIGS = [
         num_train_steps=20_000,
         batch_size=32,
         num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
+    ),
+    # Opt-in LoRA variant (Task 5): identical to pi05_droid_jointpos_vlash except the gemma
+    # variants are swapped for their `_lora` forms (openpi's standard LoRA mechanism -- see
+    # `pi0_libero_low_mem_finetune` above) and `freeze_filter` freezes everything except the
+    # LoRA adapters and the three fresh state-conditioning modules.
+    #
+    # Deliberately NOT `Pi0Config.get_freeze_filter()`: that only freezes ".*llm.*" params,
+    # leaving SigLIP (and the action/time projection heads) trainable. The
+    # chungyi/pi05-layer-truncation branch's LoRA arms hit exactly this failure mode --
+    # `get_freeze_filter()` alongside a LoRA-only LLM left SigLIP free to fully retrain, which
+    # collapsed that DROID policy to 0%. So this filter follows that branch's fix
+    # (`nnx.Not(PathRegex(".*lora.*"))`, freezing everything but LoRA) with an explicit
+    # carve-out so the three fresh state modules -- which have no LoRA adapters of their own
+    # and must learn from scratch -- stay trainable too.
+    TrainConfig(
+        name="pi05_droid_jointpos_vlash_lora",
+        project_name="vlash-droid",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=15,
+            state_cond=True,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        freeze_filter=nnx.All(
+            nnx.Not(nnx_utils.PathRegex(".*lora.*")),
+            nnx.Not(nnx_utils.PathRegex(".*(state_proj|state_mlp_in|state_mlp_out).*")),
+        ),
+        data=RLDSDroidDataConfig(
+            repo_id="droid",
+            rlds_data_dir="gs://gresearch/robotics",
+            action_space=droid_rlds_dataset.DroidActionSpace.JOINT_POSITION,
+            vlash_delta_max=3,
+            datasets=(
+                droid_rlds_dataset.RLDSDataset(
+                    name="droid",
+                    version="1.0.1",
+                    weight=1.0,
+                    filter_dict_path="gs://openpi-assets/droid/droid_sample_ranges_v1_0_1.json",
+                ),
+            ),
+            assets=AssetsConfig(
+                assets_dir="/work/roboleon1295/checkpoints/pi05_droid_jointpos/assets",
+                asset_id="droid",
+            ),
+        ),
+        # The released checkpoint has neither the state-conditioning tower (predates
+        # state_cond, same as pi05_droid_jointpos_vlash) nor any LoRA adapters (it's a
+        # full-rank checkpoint) -- both are freshly initialized and merged in.
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/work/roboleon1295/checkpoints/pi05_droid_jointpos/params",
+            missing_regex=r"(state_proj|state_mlp_in|state_mlp_out)/.*|.*lora.*",
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        num_train_steps=20_000,
+        batch_size=32,
+        num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
+        # Turn off EMA for LoRA finetuning (matches pi0_libero_low_mem_finetune convention).
+        ema_decay=None,
     ),
     #
     # Fine-tuning Libero configs.

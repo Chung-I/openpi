@@ -16,6 +16,8 @@ TrainConfig on either branch -- on chungi/pi05-layer-truncation it only exists i
 
 import re
 
+import flax.nnx as nnx
+import jax
 import pytest
 
 import openpi.models.pi0_config as pi0_config
@@ -178,3 +180,116 @@ def test_unshared_vlash_config_untouched_by_task4():
     assert transforms_vlash.VlashTemporalOffset in data_kinds
     assert transforms_vlash.VlashAllOffsets not in data_kinds
     assert transforms_vlash.SplitVlashBranches not in [type(t) for t in data_config.model_transforms.inputs]
+
+
+# ----------------------------------------------------------------------------------------------
+# Task 5: opt-in LoRA variant `pi05_droid_jointpos_vlash_lora`.
+#
+# Identical to `pi05_droid_jointpos_vlash` (Task 3) except: (a) the PaliGemma/action-expert
+# gemma variants are swapped for their `_lora` forms (openpi's standard LoRA mechanism -- see
+# `pi0_libero_low_mem_finetune`/`pi0_fast_libero_low_mem_finetune` above and
+# `Pi0Config.get_freeze_filter`), and (b) `freeze_filter` freezes everything EXCEPT the LoRA
+# adapters and the three fresh state-conditioning modules. The three state modules are kept
+# trainable deliberately: `Pi0Config.get_freeze_filter()` alone would already leave them
+# trainable (they aren't nested under ".*llm.*"), but it would ALSO leave SigLIP and the
+# action/time projection heads trainable, which is exactly the failure mode the
+# chungyi/pi05-layer-truncation branch's LoRA arms documented (leaving SigLIP trainable
+# alongside a frozen-except-LoRA LLM caused an imbalance that collapsed the DROID policy to
+# 0%). So this variant freezes everything but LoRA + the state tower, matching that branch's
+# `nnx.Not(PathRegex(".*lora.*"))` pattern with an explicit carve-out for the state modules.
+# ----------------------------------------------------------------------------------------------
+
+LORA_CONFIG_NAME = "pi05_droid_jointpos_vlash_lora"
+
+_STATE_MODULE_NAMES = ("state_proj", "state_mlp_in", "state_mlp_out")
+
+
+def test_lora_config_exists():
+    config = _config.get_config(LORA_CONFIG_NAME)
+    assert config.name == LORA_CONFIG_NAME
+
+
+def test_lora_config_uses_lora_gemma_variants():
+    config = _config.get_config(LORA_CONFIG_NAME)
+    assert config.model.paligemma_variant == "gemma_2b_lora"
+    assert config.model.action_expert_variant == "gemma_300m_lora"
+
+
+def test_lora_config_matches_vlash_otherwise():
+    """Everything but the gemma variants/freeze_filter/weight_loader.missing_regex must match
+    `pi05_droid_jointpos_vlash` -- this is an opt-in LoRA *variant*, not a different recipe."""
+    base = _config.get_config(CONFIG_NAME)
+    lora = _config.get_config(LORA_CONFIG_NAME)
+    assert lora.model.pi05 is True
+    assert lora.model.state_cond is True
+    assert lora.model.action_horizon == base.model.action_horizon == 15
+    assert lora.model.discrete_state_input is False
+    assert lora.model.action_dim == base.model.action_dim
+    assert isinstance(lora.data, _config.RLDSDroidDataConfig)
+    assert lora.data.rlds_data_dir == base.data.rlds_data_dir
+    assert lora.data.action_space == base.data.action_space
+    assert lora.data.vlash_delta_max == base.data.vlash_delta_max == 3
+    assert lora.data.assets.assets_dir == base.data.assets.assets_dir
+    assert lora.weight_loader.params_path == base.weight_loader.params_path
+    assert lora.num_workers == 0
+
+
+def test_lora_config_window_and_offset_transform():
+    config = _config.get_config(LORA_CONFIG_NAME)
+    data_config = config.data.create(config.assets_dirs, config.model)
+    assert data_config.rlds_action_horizon == 18  # 15 + delta_max(3)
+    inputs = data_config.data_transforms.inputs
+    kinds = [type(t) for t in inputs]
+    assert transforms_vlash.VlashTemporalOffset in kinds
+    offset_transform = inputs[kinds.index(transforms_vlash.VlashTemporalOffset)]
+    assert offset_transform.delta_max == 3
+    assert offset_transform.action_horizon == 15
+
+
+def test_lora_weight_loader_missing_regex_allows_lora_and_state_modules():
+    config = _config.get_config(LORA_CONFIG_NAME)
+    assert isinstance(config.weight_loader, weight_loaders.CheckpointWeightLoader)
+    pattern = re.compile(config.weight_loader.missing_regex)
+    for key in ("state_proj/kernel", "state_mlp_in/kernel", "state_mlp_out/bias"):
+        assert pattern.fullmatch(key), f"{key} should be allowed missing"
+    for key in (
+        "PaliGemma/llm/layers/attn/q_einsum/lora_a",
+        "PaliGemma/llm/layers/attn/q_einsum_1/lora_b",
+        "PaliGemma/llm/layers/mlp/gating_einsum_lora_a",
+    ):
+        assert pattern.fullmatch(key), f"{key} should be allowed missing"
+    # Sanity: a real base weight must NOT be swallowed by the same regex.
+    assert not pattern.fullmatch("PaliGemma/llm/layers/attn/attn_vec_einsum/w")
+    assert not pattern.fullmatch("time_mlp_in/kernel")
+
+
+def test_lora_freeze_filter_partitions_params():
+    """Shape-only param-partition check (mirrors `pi0_test.py::_get_frozen_state`): base
+    attention weights frozen, LoRA adapters trainable, all three state modules trainable."""
+    config = _config.get_config(LORA_CONFIG_NAME)
+    abstract_model = nnx.eval_shape(config.model.create, jax.random.key(0))
+
+    frozen = nnx.state(abstract_model, nnx.All(nnx.Param, config.freeze_filter)).flat_state()
+    trainable = nnx.state(abstract_model, nnx.All(nnx.Param, nnx.Not(config.freeze_filter))).flat_state()
+    frozen_paths = list(frozen)
+    trainable_paths = list(trainable)
+
+    # (a) A known base attention kernel is frozen.
+    assert ("PaliGemma", "llm", "layers", "attn", "attn_vec_einsum", "w") in frozen_paths
+
+    # (b) LoRA params are trainable, and no LoRA param is frozen.
+    assert any("lora_a" in p or "lora_b" in p for path in trainable_paths for p in path)
+    assert not any("lora_a" in p or "lora_b" in p for path in frozen_paths for p in path)
+
+    # (c) All three fresh state modules are trainable (kernel + bias each).
+    for module_name in _STATE_MODULE_NAMES:
+        module_trainable_paths = [path for path in trainable_paths if path[0] == module_name]
+        assert {path[-1] for path in module_trainable_paths} == {"kernel", "bias"}, module_name
+        assert not any(path[0] == module_name for path in frozen_paths), module_name
+
+
+def test_lora_config_ema_disabled():
+    """Matches upstream's LoRA convention (`pi0_libero_low_mem_finetune` etc.): EMA is turned
+    off for LoRA finetuning."""
+    config = _config.get_config(LORA_CONFIG_NAME)
+    assert config.ema_decay is None

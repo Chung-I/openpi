@@ -1107,6 +1107,78 @@ _CONFIGS = [
         ema_decay=None,
     ),
     TrainConfig(
+        # HEADLINE VLASH run, keep-prompt variant: the least-disruptive way to add the
+        # future-state channel to an ALREADY-COMPETENT checkpoint.
+        #
+        # Every collapsed run so far stripped state from the prompt (state_cond with
+        # keep_prompt=False), which changes the input format the released checkpoint was
+        # trained on AND leaves the model with no state at all at step 0 -- state_mlp_out
+        # is zero-init, so the AdaRMS channel starts silent. LoRA then has to relearn
+        # proprioception from scratch on top of a format change.
+        #
+        # This config instead keeps the discrete State: section in the prompt, so at step 0
+        # the served policy is functionally identical to the released baseline (verified:
+        # model_transforms match pi05_droid_jointpos exactly, and state_emb == 0 by
+        # zero-init). Training only has to learn to USE the extra rolled-forward-state
+        # channel, never to rebuild the one it already has.
+        #
+        # Contrast with vlash's own recipe (examples/train/pi05/async.yaml): vlash strips
+        # the prompt state, but it fine-tunes pi05_BASE -- a generalist with no task
+        # competence to preserve -- for 50K steps. We start from a task-specialized
+        # checkpoint at 96% on BananaInBowl, so "don't disturb it" is the operative
+        # constraint that vlash never faced.
+        name="pi05_droid_jointpos_vlash_lora_keepprompt",
+        project_name="vlash-droid",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=16,
+            state_cond=True,
+            state_cond_keep_prompt_state=True,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        freeze_filter=nnx.All(
+            nnx.Not(nnx_utils.PathRegex(".*lora.*")),
+            nnx.Not(nnx_utils.PathRegex(".*(state_proj|state_mlp_in|state_mlp_out).*")),
+        ),
+        data=RLDSDroidDataConfig(
+            repo_id="droid",
+            rlds_data_dir="gs://gresearch/robotics",
+            action_space=droid_rlds_dataset.DroidActionSpace.JOINT_POSITION,
+            # The actual VLASH mechanism: offsets 0..3 (>=200ms at DROID's 15Hz).
+            vlash_delta_max=3,
+            datasets=(
+                droid_rlds_dataset.RLDSDataset(
+                    name="droid",
+                    version="1.0.1",
+                    weight=1.0,
+                    filter_dict_path="gs://openpi-assets/droid/droid_sample_ranges_v1_0_1.json",
+                ),
+            ),
+            assets=AssetsConfig(
+                assets_dir="/work/roboleon1295/checkpoints/pi05_droid_jointpos/assets",
+                asset_id="droid",
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/work/roboleon1295/checkpoints/pi05_droid_jointpos/params",
+            missing_regex=r"(state_proj|state_mlp_in|state_mlp_out)/.*|.*lora.*",
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        num_train_steps=20_000,
+        vlash_val_interval=1000,
+        batch_size=128,
+        num_workers=0,  # RLDS DataLoader requires num_workers=0; it handles multiprocessing internally.
+        ema_decay=None,
+    ),
+    TrainConfig(
         # CONTROL: plain LoRA finetune of the released checkpoint on DROID RLDS with
         # NO vlash changes at all (state stays in the prompt, no offsets). Discriminates
         # 'any finetuning breaks sim transfer' (this collapses too) from 'the state_cond

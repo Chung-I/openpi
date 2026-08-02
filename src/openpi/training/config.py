@@ -1013,6 +1013,86 @@ _CONFIGS = [
         # Turn off EMA for LoRA finetuning (matches pi0_libero_low_mem_finetune convention).
         ema_decay=None,
     ),
+    # Ablation (SCOPE ADD): isolates the text-encoded-state -> AdaRMS-state-embedding factor
+    # (Task 1's state_cond=True) from offset training (Task 2's VlashTemporalOffset), by
+    # training the SAME AdaRMS-conditioned architecture as pi05_droid_jointpos_vlash but ONLY
+    # ever at delta=0 -- no temporal-offset augmentation at all.
+    #
+    # Identical to pi05_droid_jointpos_vlash in every field except vlash_delta_max (3 -> 0) and
+    # naming. vlash_delta_max=0 still routes through the exact same `RLDSDroidDataConfig.create`
+    # code path as the delta_max=3 config (it is not None, so the `if self.vlash_delta_max is
+    # not None:` branch still fires): the RLDS window becomes action_horizon + 0 = 15 steps
+    # (no extra lookahead needed since there's never anywhere to roll forward to), and
+    # `VlashTemporalOffset(delta_max=0, action_horizon=15)` is still inserted after
+    # `DeltaActions`. At delta_max=0, `VlashTemporalOffset.__call__` samples
+    # `rng.integers(0, 0 + 1)`, i.e. `rng.integers(0, 1)`, which is always exactly 0 --
+    # `apply_offset(sample, delta=0, ...)` then takes the `delta > 0` branch's `False` path, so
+    # `state` passes through completely unmodified (no `.copy()`, no roll-forward mutation) and
+    # `actions` is sliced to `actions[0:15]` (a no-op slice of the full window) -- a clean,
+    # side-effect-free identity beyond recording `vlash_offset=0`. So this config's data
+    # pipeline is architecturally identical to pi05_droid_jointpos_vlash's, just deterministically
+    # anchored at delta=0 every single step instead of sampling from {0,1,2,3}.
+    #
+    # Deliberately NON-shared (no `vlash_shared_obs`): the shared-obs path's entire point is
+    # amortizing the expensive prefix forward pass across `vlash_delta_max + 1` DIFFERENT
+    # temporal-offset branches (Task 4's KV-broadcast design) -- at delta_max=0 that would be
+    # exactly ONE (identity) branch, so shared-obs here would just be the unshared path with
+    # none of its compute saving purpose. `vlash_val_interval`'s `PerOffsetValLoss` hook still
+    # works unmodified with `vlash_delta_max=0` (`tuple(range(0 + 1)) == (0,)`): it caches and
+    # logs a single `val_loss/delta_0` series only -- correct behavior for a delta_max=0 config,
+    # not a bug, so no per-config override or opt-out is needed here.
+    TrainConfig(
+        name="pi05_droid_jointpos_statecond_d0",
+        project_name="vlash-droid",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=15,
+            # AdaRMS state conditioning (Task 1): state reaches the model through a fresh
+            # state_proj/state_mlp_in/state_mlp_out tower instead of the discrete prompt.
+            # Identical to pi05_droid_jointpos_vlash's model config in every respect --
+            # architecture is NOT the ablated factor here, offset training is.
+            state_cond=True,
+            discrete_state_input=False,
+        ),
+        data=RLDSDroidDataConfig(
+            repo_id="droid",
+            rlds_data_dir="gs://gresearch/robotics",
+            action_space=droid_rlds_dataset.DroidActionSpace.JOINT_POSITION,
+            # The ablated factor: always delta=0, never sampled from {1,2,3}. Window becomes
+            # action_horizon (15) + vlash_delta_max (0) = 15 -- see the block comment above.
+            vlash_delta_max=0,
+            datasets=(
+                droid_rlds_dataset.RLDSDataset(
+                    name="droid",
+                    version="1.0.1",
+                    weight=1.0,
+                    filter_dict_path="gs://openpi-assets/droid/droid_sample_ranges_v1_0_1.json",
+                ),
+            ),
+            assets=AssetsConfig(
+                assets_dir="/work/roboleon1295/checkpoints/pi05_droid_jointpos/assets",
+                asset_id="droid",
+            ),
+        ),
+        # Same released pi05_droid_jointpos params + missing-state-modules regex as
+        # pi05_droid_jointpos_vlash (this checkpoint predates state_cond regardless of which
+        # offset-training regime the new run uses).
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/work/roboleon1295/checkpoints/pi05_droid_jointpos/params",
+            missing_regex=r"(state_proj|state_mlp_in|state_mlp_out)/.*",
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        num_train_steps=20_000,
+        vlash_val_interval=1000,
+        batch_size=32,
+        num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
+    ),
     #
     # Fine-tuning Libero configs.
     #

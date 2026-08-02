@@ -340,3 +340,69 @@ def test_vlash_fixed_delta_and_shared_obs_mutually_exclusive():
     fixed_data_cfg = dataclasses.replace(config.data, vlash_fixed_delta=0)
     with pytest.raises(ValueError, match="mutually exclusive"):
         fixed_data_cfg.create(config.assets_dirs, config.model)
+
+
+# ----------------------------------------------------------------------------------------------
+# Ablation (SCOPE ADD): `pi05_droid_jointpos_statecond_d0` -- identical to
+# pi05_droid_jointpos_vlash except vlash_delta_max=0 (trains only at the delta=0 anchor, no
+# temporal-offset augmentation), isolating the AdaRMS state-conditioning architecture factor
+# from offset training.
+# ----------------------------------------------------------------------------------------------
+
+D0_CONFIG_NAME = "pi05_droid_jointpos_statecond_d0"
+
+
+def test_statecond_d0_config_window_delta_max_and_state_cond():
+    """Window = action_horizon(15) + vlash_delta_max(0) = 15; delta_max=0; state_cond=True."""
+    config = _config.get_config(D0_CONFIG_NAME)
+    assert config.data.vlash_delta_max == 0
+    assert config.model.state_cond is True
+    assert config.model.pi05 is True
+    assert config.model.vlash_shared_obs is False
+    assert config.data.vlash_shared_obs is False
+    data_config = config.data.create(config.assets_dirs, config.model)
+    assert data_config.rlds_action_horizon == 15
+    kinds = [type(t) for t in data_config.data_transforms.inputs]
+    assert transforms_vlash.VlashTemporalOffset in kinds
+    offset_transform = data_config.data_transforms.inputs[kinds.index(transforms_vlash.VlashTemporalOffset)]
+    assert offset_transform.delta_max == 0
+    assert offset_transform.action_horizon == 15
+
+
+def test_statecond_d0_config_matches_vlash_headline_otherwise():
+    """Everything but vlash_delta_max/name/project bookkeeping must match
+    pi05_droid_jointpos_vlash -- this is a targeted ablation, not a different recipe."""
+    base = _config.get_config(CONFIG_NAME)
+    d0 = _config.get_config(D0_CONFIG_NAME)
+    assert d0.model.pi05 == base.model.pi05 is True
+    assert d0.model.state_cond == base.model.state_cond is True
+    assert d0.model.action_horizon == base.model.action_horizon == 15
+    assert d0.model.discrete_state_input == base.model.discrete_state_input is False
+    assert d0.model.action_dim == base.model.action_dim
+    assert isinstance(d0.data, _config.RLDSDroidDataConfig)
+    assert d0.data.rlds_data_dir == base.data.rlds_data_dir
+    assert d0.data.action_space == base.data.action_space
+    assert d0.data.assets.assets_dir == base.data.assets.assets_dir
+    assert d0.weight_loader.params_path == base.weight_loader.params_path
+    assert d0.weight_loader.missing_regex == base.weight_loader.missing_regex
+    assert d0.num_workers == base.num_workers == 0
+    assert d0.vlash_val_interval == base.vlash_val_interval == 1000
+    # The one deliberate difference:
+    assert d0.data.vlash_delta_max == 0
+    assert base.data.vlash_delta_max == 3
+
+
+def test_vlash_headline_config_untouched_by_d0_ablation():
+    """Guards against this ablation accidentally mutating the shared `pi05_droid_jointpos_vlash`
+    headline config (e.g. via an aliased/mutated dataclass field)."""
+    config = _config.get_config(CONFIG_NAME)
+    assert config.name == CONFIG_NAME
+    assert config.model.pi05 is True
+    assert config.model.state_cond is True
+    assert config.model.action_horizon == 15
+    assert config.data.vlash_delta_max == 3
+    data_config = config.data.create(config.assets_dirs, config.model)
+    assert data_config.rlds_action_horizon == 18
+    kinds = [type(t) for t in data_config.data_transforms.inputs]
+    offset_transform = data_config.data_transforms.inputs[kinds.index(transforms_vlash.VlashTemporalOffset)]
+    assert offset_transform.delta_max == 3

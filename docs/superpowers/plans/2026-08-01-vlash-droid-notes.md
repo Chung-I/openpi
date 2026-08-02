@@ -974,3 +974,57 @@ imminent OOM at this much larger `--mem`.
    (whether the delta separation grows, shrinks, or stays stable as training continues), and
    final checkpoint completeness. Left running per the brief; monitoring is the controller's
    responsibility from here.
+
+## Ablation — `pi05_droid_jointpos_statecond_d0` (isolates state_cond from offset training)
+
+**Status: config + sbatch built, health-check to be reported separately (see
+`statecond-d0-train-report.md`).** New `TrainConfig` `pi05_droid_jointpos_statecond_d0`: a
+byte-for-byte copy of `pi05_droid_jointpos_vlash`'s model/data/weight_loader/lr_schedule fields
+with exactly one change, `RLDSDroidDataConfig.vlash_delta_max` (3 -> 0). Purpose: isolate the
+AdaRMS state-conditioning architecture factor (Task 1's `state_cond=True`) from offset training
+(Task 2's `VlashTemporalOffset` sampling delta in `{0,1,2,3}`), by training the SAME
+architecture but ONLY ever anchored at delta=0.
+
+- **Mechanism check**: `vlash_delta_max=0` is not `None`, so it still routes through
+  `RLDSDroidDataConfig.create()`'s existing `if self.vlash_delta_max is not None:` branch (no
+  new code path) -- `rlds_action_horizon = 15 + 0 = 15` (no extra lookahead needed) and
+  `VlashTemporalOffset(delta_max=0, action_horizon=15)` is still inserted after `DeltaActions`.
+  At `delta_max=0`, `rng.integers(0, delta_max + 1)` is `rng.integers(0, 1)`, always exactly 0;
+  `apply_offset(delta=0, ...)` takes the `delta > 0` branch's `False` path, so `state` passes
+  through with no `.copy()`/mutation and `actions` is sliced to `actions[0:15]` (a no-op full-
+  window slice) -- a clean, side-effect-free identity beyond recording `vlash_offset=0`.
+- **Deliberately NON-shared**: `vlash_shared_obs` amortizes the prefix forward pass across
+  `vlash_delta_max + 1` DIFFERENT delta branches (Task 4's KV-broadcast design); at
+  `delta_max=0` that would be exactly ONE (identity) branch, i.e. the unshared path with none of
+  the compute-saving purpose. Uses the plain `Pi0.compute_loss` dispatch, where `batch_size`
+  directly equals effective (obs, action-chunk) pairs/step (no 4x multiplier).
+- **`PerOffsetValLoss` compatibility**: `vlash_val_interval=1000` is kept on (matches the other
+  three vlash configs); `PerOffsetValLoss.build`'s `tuple(range(vlash_delta_max + 1))` resolves
+  to `(0,)` at `delta_max=0`, so it builds and caches exactly one held-out batch and logs a
+  single `val_loss/delta_0` series -- correct, expected behavior for a delta_max=0 config, not a
+  bug that needed a workaround or opt-out.
+- **Tests** (`src/openpi/training/config_test.py`, new section at the end of the file): window
+  (15)/delta_max(0)/state_cond(True) assertions on the new config; a field-by-field parity check
+  against `pi05_droid_jointpos_vlash` proving everything else matches; and a guard test
+  (`test_vlash_headline_config_untouched_by_d0_ablation`) re-asserting the headline config's
+  `vlash_delta_max == 3` / `rlds_action_horizon == 18` to catch any accidental aliasing. All 32
+  tests in `config_test.py` pass locally.
+- **`scripts/nchc/statecond_d0_train.sbatch`** (new): direct copy of
+  `scripts/nchc/vlash_droid_train.sbatch` with only the config name (defaults to
+  `pi05_droid_jointpos_statecond_d0`), `--job-name`/`--output` naming, and default
+  `batch_size=32`/`exp_name=statecond_d0_headline` changed -- identical `--mem=800G`,
+  `--fsdp-devices=4`, `4xH200`/`8gpus` partition, CA-bundle GCS-egress exports, quota preflight,
+  `--keep-period=40000`, 30,000 steps, 24h cap. `batch_size=32` (non-shared) is the direct
+  analog of the headline shared config's 32 effective (obs, action-chunk) pairs/step (8/GPU x 4
+  branches x 4 GPUs there vs. 8/GPU x 4 GPUs, no branch multiplier, here).
+- Local GPU-touching test suites (`tests/test_state_cond.py`, `tests/test_shared_obs.py`,
+  `tests/test_vlash_eval.py`) were NOT run against the local 5090 for this change -- that GPU is
+  actively serving the RoboLab eval this task must not disturb, confirmed busy via `nvidia-smi`
+  (29.6/32.6GB used, RoboLab's own ~8.3GB process resident) before touching anything further. A
+  stray backgrounded full-suite pytest invocation from this same investigation transiently
+  competed for GPU memory (OOM'd on its own side) before being killed once noticed; RoboLab's
+  process was never itself interrupted (confirmed still resident at its expected ~8.3GB
+  footprint immediately after). Verification for this change relies on `config_test.py` (pure
+  config/dataclass logic, no GPU) and `ruff check`/`ruff format --check` (both clean), which is
+  sufficient coverage for a config-only change that reuses `RLDSDroidDataConfig.create()`'s
+  already-tested `vlash_delta_max is not None` code path with a different int value.

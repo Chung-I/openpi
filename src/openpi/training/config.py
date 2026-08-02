@@ -150,7 +150,7 @@ class ModelTransformFactory(GroupFactory):
                             # VLASH: when state_cond is on, state reaches the model via AdaRMS
                             # conditioning, so the prompt should use the pi05_no_state format
                             # rather than duplicating state as a discrete token section.
-                            pi05_no_state=model_config.state_cond,
+                            pi05_no_state=model_config.state_cond and not model_config.state_cond_keep_prompt_state,
                         ),
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],

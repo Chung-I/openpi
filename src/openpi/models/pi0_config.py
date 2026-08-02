@@ -32,6 +32,12 @@ class Pi0Config(_model.BaseModelConfig):
     # When True (pi05 only), condition adaRMS on robot state (in addition to the flow-matching
     # timestep) via a fresh state_proj/state_mlp_in/state_mlp_out tower. Requires pi05=True.
     state_cond: bool = False
+    # When state_cond is on, vlash REPLACES the discrete prompt-state channel with the AdaRMS
+    # branch. That is right for adapting a generalist into a new domain (vlash's LIBERO case),
+    # but it discards information a specialized checkpoint was pretrained to use. Setting this
+    # keeps the prompt state as well, so with the zero-initialized state_mlp_out the model is
+    # bit-exact the pretrained one at step 0 and the state branch grows as an ADDITIONAL channel.
+    state_cond_keep_prompt_state: bool = False
     # VLASH shared-observation training (opt-in): each batch element carries all
     # `delta_max + 1` temporal-offset branches (Observation.vlash_states [b, k, s] plus
     # stacked actions [b, k, ah, ad]). The (images + language) prefix is computed ONCE per

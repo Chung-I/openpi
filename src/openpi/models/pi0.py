@@ -112,7 +112,22 @@ class Pi0(_model.BaseModel):
             if config.state_cond:
                 self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
                 self.state_mlp_in = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
-                self.state_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
+                # Zero-init the output layer so state_emb == 0 at step 0: training then starts
+                # from exactly the pretrained checkpoint and grows the state contribution
+                # gradually (standard residual-branch init; matches vlash's torch reference,
+                # modeling_pi05.py:156-158, which this port had omitted). Without it a
+                # randomly-initialized state_emb is added straight onto the *trained* time_emb
+                # in `adarms_cond`, corrupting the flow-matching timestep conditioning the
+                # action expert depends on -- measured as RoboLab BananaInBowl collapsing from
+                # the released checkpoint's 96% to 0-20% within 500 steps, under both full
+                # finetuning and LoRA.
+                self.state_mlp_out = nnx.Linear(
+                    action_expert_config.width,
+                    action_expert_config.width,
+                    kernel_init=nnx.initializers.zeros_init(),
+                    bias_init=nnx.initializers.zeros_init(),
+                    rngs=rngs,
+                )
         else:
             self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
             self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)

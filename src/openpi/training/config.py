@@ -848,6 +848,52 @@ _CONFIGS = [
         batch_size=32,
         num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
     ),
+    # Serving-only companion to pi05_droid_jointpos_vlash (Task 9 finding). `serve_policy.py`
+    # builds its data pipeline via the SAME `train_config.data.create(...)` used by training
+    # (policy_config.create_trained_policy), and `RLDSDroidDataConfig.create()` unconditionally
+    # inserts `transforms_vlash.VlashTemporalOffset`/`VlashAllOffsets` into the INPUT transform
+    # chain whenever `vlash_delta_max` is set -- both read `sample["actions"]`, which a live
+    # inference request never has (no ground-truth future actions to offset). Serving any of
+    # the vlash TrainConfigs (`_vlash`, `_vlash_shared`, `_vlash_lora`) as-is therefore crashes
+    # every single call with `KeyError: 'actions'` inside `apply_offset` -- this is NOT the
+    # `vlash_shared_obs` mismatch the brief anticipated (that part is fine: sample_actions never
+    # reads `vlash_shared_obs`, so param trees are identical across the vlash configs and any of
+    # them can serve a checkpoint trained under any other). The offset transform is a
+    # training-time-only augmentation and has no serving equivalent -- it must not run at all
+    # at serve time.
+    #
+    # Fix: mirror the plain `pi05_droid_jointpos` (RELEASED baseline) config's approach --
+    # SimpleDataConfig with no RLDS machinery and no temporal-offset transform -- but with the
+    # VLASH model shape (state_cond=True, discrete_state_input=False) so state reaches the model
+    # via AdaRMS instead of the discrete prompt. `assets_dir` is unused for serving (norm stats
+    # load from `checkpoint_dir / "assets"`, same as every other serving config here); only
+    # `asset_id="droid"` matters. Serve any vlash-trained checkpoint (shared-obs or not) with:
+    #   scripts/serve_policy.py policy:checkpoint --policy.config=pi05_droid_jointpos_vlash_serve \
+    #       --policy.dir=<checkpoint_dir>
+    TrainConfig(
+        name="pi05_droid_jointpos_vlash_serve",
+        project_name="vlash-droid",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=15,
+            state_cond=True,
+            discrete_state_input=False,
+        ),
+        data=SimpleDataConfig(
+            assets=AssetsConfig(asset_id="droid"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[droid_policy.DroidInputs(model_type=ModelType.PI05)],
+                outputs=[
+                    _transforms.AbsoluteActions(_transforms.make_bool_mask(7, -1)),
+                    droid_policy.DroidOutputs(),
+                ],
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+    ),
     # Shared-observation variant (Task 4, opt-in): identical to pi05_droid_jointpos_vlash
     # except every batch element carries ALL `delta_max + 1` offset branches and the prefix
     # forward pass is shared across them (Pi0.compute_loss_shared_obs, KV-broadcast). NOTE:

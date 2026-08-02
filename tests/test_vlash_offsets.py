@@ -48,3 +48,15 @@ def test_fixed_offset_never_varies():
         np.testing.assert_array_equal(out["actions"], expected["actions"])
         np.testing.assert_array_equal(out["state"], expected["state"])
         assert out["vlash_offset"] == 2
+
+
+def test_offset_transforms_noop_without_actions():
+    """Serving applies data_transforms to observations only; the offset transforms must
+    pass through instead of raising KeyError (DeltaActions carries the same guard)."""
+    from openpi.transforms_vlash import VlashAllOffsets
+
+    obs_only = {"state": np.zeros(8, dtype=np.float32)}
+    for tr in (VlashTemporalOffset(delta_max=3, action_horizon=15), VlashAllOffsets(delta_max=3, action_horizon=15)):
+        out = tr(dict(obs_only))
+        assert "actions" not in out
+        np.testing.assert_array_equal(out["state"], obs_only["state"])

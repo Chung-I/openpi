@@ -105,6 +105,9 @@ class VlashAllOffsets(DataTransformFn):
     action_horizon: int
 
     def __call__(self, data: DataDict) -> DataDict:
+        # See VlashTemporalOffset.__call__: inference has no actions to branch over.
+        if "actions" not in data:
+            return data
         return apply_all_offsets(data, delta_max=self.delta_max, action_horizon=self.action_horizon)
 
 
@@ -175,6 +178,13 @@ class VlashTemporalOffset(DataTransformFn):
     rng_key: str = "vlash_offset"
 
     def __call__(self, data: DataDict) -> DataDict:
+        # No-op at inference: the serving pipeline applies data_transforms to observations
+        # only, so there are no actions to offset and no future state to roll forward (the
+        # eval client performs the rollforward itself). Mirrors the guard `DeltaActions`
+        # already carries (`transforms.py`: `if "actions" not in data ...: return data`);
+        # without it, serving a training config raises KeyError: 'actions'.
+        if "actions" not in data:
+            return data
         rng = np.random.default_rng()
         delta = int(rng.integers(0, self.delta_max + 1))
         _log_first_batch_offsets(delta)

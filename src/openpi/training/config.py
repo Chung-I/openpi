@@ -1092,7 +1092,9 @@ _CONFIGS = [
         ),
         num_train_steps=20_000,
         vlash_val_interval=1000,
-        batch_size=32,
+        # 128 x 20k = 2.56M samples: the proven DROID recipe (truncation 18L LoRA control
+        # scored 93.8% on BananaInBowl with it; the MEM video-encoder runs used it too).
+        batch_size=128,
         num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
         # Turn off EMA for LoRA finetuning (matches pi0_libero_low_mem_finetune convention).
         ema_decay=None,

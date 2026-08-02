@@ -68,8 +68,15 @@ mkdir -p logs
 # continues -- cheap insurance on top of the shuffle-buffer fix above, at the cost of a slower
 # (synchronous) save; re-evaluate both flags for the real multi-GPU training job, where async
 # checkpointing matters for throughput and the large --mem allocation covers the shuffle buffer.
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.8 uv run --no-sync python scripts/train.py pi05_droid_jointpos_vlash \
-  --exp-name=vlash_repro \
+
+# Parameterized so any config can be smoke-tested before a multi-hour run; defaults keep
+# the original pi05_droid_jointpos_vlash behavior for existing callers.
+CONFIG=${CONFIG:-pi05_droid_jointpos_vlash}
+EXP_NAME=${EXP_NAME:-vlash_repro}
+echo "PREFLIGHT CONFIG=$CONFIG EXP_NAME=$EXP_NAME"
+
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.8 uv run --no-sync python scripts/train.py "$CONFIG" \
+  --exp-name="$EXP_NAME" \
   --overwrite \
   --batch-size=4 \
   --num-train-steps=12 \

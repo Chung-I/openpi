@@ -6,6 +6,21 @@ from openpi.models import pi0, pi0_config
 from openpi.models.tokenizer import PaligemmaTokenizer
 
 
+def _tiny(**kwargs) -> pi0_config.Pi0Config:
+    """Pi0Config with toy transformer widths.
+
+    These tests exercise `embed_suffix` wiring only -- which modules exist, what
+    `adarms_cond` depends on -- and never run the LLM or the vision tower, so the
+    real gemma_2b/gemma_300m weights are pure cost. At full size each Pi0 is ~3B
+    fp32 params (~12 GB) and `test_state_cond_starts_as_identity` holds two at
+    once; that allocated 24.8 GB and OOM-killed a 30 GB workstation (kernel log
+    2026-08-03 02:25:43). Note the SigLIP tower is hardcoded So400m/14 in
+    Pi0.__init__ regardless of variant, so BOTH variants must be dummy for the
+    footprint to actually drop (~1.7 GB/model, the tower alone).
+    """
+    return pi0_config.Pi0Config(paligemma_variant="dummy", action_expert_variant="dummy", **kwargs)
+
+
 def test_config_flag_default_false():
     cfg = pi0_config.Pi0Config(pi05=True)
     assert cfg.state_cond is False
@@ -14,7 +29,7 @@ def test_config_flag_default_false():
 def test_state_changes_adarms_cond():
     import flax.nnx as nnx
 
-    cfg = pi0_config.Pi0Config(pi05=True, state_cond=True, action_horizon=15)
+    cfg = _tiny(pi05=True, state_cond=True, action_horizon=15)
     model = pi0.Pi0(cfg, rngs=nnx.Rngs(0))
     # state_mlp_out is zero-initialized (residual-branch init), so the state branch is
     # deliberately inert at step 0; perturb it to exercise the trained-state behavior.
@@ -32,7 +47,7 @@ def test_state_changes_adarms_cond():
 def test_state_cond_false_matches_stock():
     import flax.nnx as nnx
 
-    cfg = pi0_config.Pi0Config(pi05=True, state_cond=False, action_horizon=15)
+    cfg = _tiny(pi05=True, state_cond=False, action_horizon=15)
     model = pi0.Pi0(cfg, rngs=nnx.Rngs(0))
     obs = cfg.fake_obs()
     x_t = jnp.zeros((1, cfg.action_horizon, cfg.action_dim))
@@ -60,7 +75,7 @@ def test_state_cond_starts_as_identity():
     not, which collapsed RoboLab success from 96% to 0-20% within 500 steps)."""
     import flax.nnx as nnx
 
-    cfg = pi0_config.Pi0Config(pi05=True, state_cond=True, action_horizon=15)
+    cfg = _tiny(pi05=True, state_cond=True, action_horizon=15)
     model = pi0.Pi0(cfg, rngs=nnx.Rngs(0))
     obs = cfg.fake_obs()
     x_t = jnp.zeros((1, cfg.action_horizon, cfg.action_dim))
@@ -68,7 +83,7 @@ def test_state_cond_starts_as_identity():
 
     _, _, _, cond_state = model.embed_suffix(obs, x_t, t)
     # Same config with the state branch off: cond is time-only.
-    ref = pi0.Pi0(pi0_config.Pi0Config(pi05=True, state_cond=False, action_horizon=15), rngs=nnx.Rngs(0))
+    ref = pi0.Pi0(_tiny(pi05=True, state_cond=False, action_horizon=15), rngs=nnx.Rngs(0))
     _, _, _, cond_time = ref.embed_suffix(obs, x_t, t)
     assert jnp.allclose(cond_state, cond_time, atol=1e-6), (
         "at init the state branch must contribute nothing; state_mlp_out is not zero-initialized"

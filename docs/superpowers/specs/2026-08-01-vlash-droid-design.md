@@ -38,6 +38,10 @@ New `TrainConfig` **`pi05_droid_jointpos_vlash`**, derived from the truncation w
 
 **A5. Pre-flight gates (LIBERO lessons):** unit test of offset slicing + rollforward against hand-computed RLDS samples; 12-step training repro job before the full run; quota check (`df -h /work/roboleon1295`) before submission — wekafs silently drops writes at full quota.
 
+**A5b. The step-0 sim gate (added 2026-08-03, after it caught the bug that had blocked this project for days).** Before committing GPU-hours to any new config, train it for *zero* steps — orbax writes checkpoint `0` before the first update, so it holds exactly the released weights plus the zero-init fresh modules — then serve that checkpoint through the config's own serving path and run ≥10 sim episodes. Because the zero-init design makes step 0 mathematically identical to the released checkpoint, the gate has a hard expected value: **it must score at the released baseline.** Anything lower is a defect in the *input pipeline or serving path*, not in training, and no amount of training will fix it.
+
+Measured here: keep-prompt scored 8/10 and stripped-prompt scored 0/10 from byte-identical weights — the stripped path silently fed the model no proprioception at all (prompt `State:` section removed while the AdaRMS branch was still zero). Crucially, **both configs showed near-identical, perfectly healthy training loss** (≈3.1 → ≈0.02, sane grad norms). Training loss is structurally blind to this class of bug; only a sim rollout through the real serving path detects it. Treat this gate as mandatory, not diagnostic.
+
 ### B. Serving (nano4 compute node → local, openpi websocket)
 
 - Stock `scripts/serve_policy.py` (+ the state_cond-aware input transform for the VLASH checkpoint) on a 1-GPU job; both checkpoints served by the same code path: released jointpos (baseline arms, unmodified path) and the VLASH finetune (AdaRMS path).

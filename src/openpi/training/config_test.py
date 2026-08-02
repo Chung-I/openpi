@@ -36,11 +36,11 @@ def test_config_exists():
     assert config.name == CONFIG_NAME
 
 
-def test_model_is_pi05_with_state_cond_and_action_horizon_15():
+def test_model_is_pi05_with_state_cond_and_action_horizon_16():
     config = _config.get_config(CONFIG_NAME)
     assert config.model.pi05 is True
     assert config.model.state_cond is True
-    assert config.model.action_horizon == 15
+    assert config.model.action_horizon == 16
     assert config.model.discrete_state_input is False
 
 
@@ -67,8 +67,8 @@ def test_rlds_window_is_18():
     """action_horizon (15) + delta_max (3) = 18 extra steps of lookahead for the offset roll."""
     config = _config.get_config(CONFIG_NAME)
     data_config = config.data.create(config.assets_dirs, config.model)
-    assert data_config.rlds_action_horizon == 18
-    assert config.model.action_horizon == 15
+    assert data_config.rlds_action_horizon == 19
+    assert config.model.action_horizon == 16
 
 
 def test_shuffle_buffer_size_defaults_to_none():
@@ -92,7 +92,7 @@ def test_offset_transform_present_after_delta_actions():
 
     offset_transform = inputs[kinds.index(transforms_vlash.VlashTemporalOffset)]
     assert offset_transform.delta_max == 3
-    assert offset_transform.action_horizon == 15
+    assert offset_transform.action_horizon == 16
 
 
 def test_tokenizer_uses_pi05_no_state():
@@ -159,7 +159,7 @@ def test_shared_config_uses_all_offsets_and_branch_split():
     assert model_kinds[-1] is transforms_vlash.SplitVlashBranches
     assert model_kinds.index(transforms_vlash.SplitVlashBranches) > model_kinds.index(_transforms.PadStatesAndActions)
     # The RLDS window still needs the delta_max lookahead.
-    assert data_config.rlds_action_horizon == 18
+    assert data_config.rlds_action_horizon == 19
 
 
 def test_shared_obs_flag_mismatch_raises():
@@ -223,7 +223,7 @@ def test_lora_config_matches_vlash_otherwise():
     lora = _config.get_config(LORA_CONFIG_NAME)
     assert lora.model.pi05 is True
     assert lora.model.state_cond is True
-    assert lora.model.action_horizon == base.model.action_horizon == 15
+    assert lora.model.action_horizon == base.model.action_horizon == 16
     assert lora.model.discrete_state_input is False
     assert lora.model.action_dim == base.model.action_dim
     assert isinstance(lora.data, _config.RLDSDroidDataConfig)
@@ -238,13 +238,13 @@ def test_lora_config_matches_vlash_otherwise():
 def test_lora_config_window_and_offset_transform():
     config = _config.get_config(LORA_CONFIG_NAME)
     data_config = config.data.create(config.assets_dirs, config.model)
-    assert data_config.rlds_action_horizon == 18  # 15 + delta_max(3)
+    assert data_config.rlds_action_horizon == 19  # 15 + delta_max(3)
     inputs = data_config.data_transforms.inputs
     kinds = [type(t) for t in inputs]
     assert transforms_vlash.VlashTemporalOffset in kinds
     offset_transform = inputs[kinds.index(transforms_vlash.VlashTemporalOffset)]
     assert offset_transform.delta_max == 3
-    assert offset_transform.action_horizon == 15
+    assert offset_transform.action_horizon == 16
 
 
 def test_lora_weight_loader_missing_regex_allows_lora_and_state_modules():
@@ -325,7 +325,7 @@ def test_vlash_fixed_delta_replaces_random_sampling():
     assert transforms_vlash.VlashTemporalOffset not in kinds
     offset_transform = data_config.data_transforms.inputs[kinds.index(transforms_vlash.VlashFixedOffset)]
     assert offset_transform.delta == 2
-    assert offset_transform.action_horizon == 15
+    assert offset_transform.action_horizon == 16
 
 
 def test_vlash_fixed_delta_out_of_range_raises():
@@ -361,12 +361,12 @@ def test_statecond_d0_config_window_delta_max_and_state_cond():
     assert config.model.vlash_shared_obs is False
     assert config.data.vlash_shared_obs is False
     data_config = config.data.create(config.assets_dirs, config.model)
-    assert data_config.rlds_action_horizon == 15
+    assert data_config.rlds_action_horizon == 16
     kinds = [type(t) for t in data_config.data_transforms.inputs]
     assert transforms_vlash.VlashTemporalOffset in kinds
     offset_transform = data_config.data_transforms.inputs[kinds.index(transforms_vlash.VlashTemporalOffset)]
     assert offset_transform.delta_max == 0
-    assert offset_transform.action_horizon == 15
+    assert offset_transform.action_horizon == 16
 
 
 def test_statecond_d0_config_matches_vlash_headline_otherwise():
@@ -376,7 +376,7 @@ def test_statecond_d0_config_matches_vlash_headline_otherwise():
     d0 = _config.get_config(D0_CONFIG_NAME)
     assert d0.model.pi05 == base.model.pi05 is True
     assert d0.model.state_cond == base.model.state_cond is True
-    assert d0.model.action_horizon == base.model.action_horizon == 15
+    assert d0.model.action_horizon == base.model.action_horizon == 16
     assert d0.model.discrete_state_input == base.model.discrete_state_input is False
     assert d0.model.action_dim == base.model.action_dim
     assert isinstance(d0.data, _config.RLDSDroidDataConfig)
@@ -399,10 +399,10 @@ def test_vlash_headline_config_untouched_by_d0_ablation():
     assert config.name == CONFIG_NAME
     assert config.model.pi05 is True
     assert config.model.state_cond is True
-    assert config.model.action_horizon == 15
+    assert config.model.action_horizon == 16
     assert config.data.vlash_delta_max == 3
     data_config = config.data.create(config.assets_dirs, config.model)
-    assert data_config.rlds_action_horizon == 18
+    assert data_config.rlds_action_horizon == 19
     kinds = [type(t) for t in data_config.data_transforms.inputs]
     offset_transform = data_config.data_transforms.inputs[kinds.index(transforms_vlash.VlashTemporalOffset)]
     assert offset_transform.delta_max == 3

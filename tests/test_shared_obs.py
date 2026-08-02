@@ -57,16 +57,21 @@ def model_cfg() -> pi0_config.Pi0Config:
 @pytest.fixture(scope="module")
 def model(model_cfg) -> pi0.Pi0:
     m = pi0.Pi0(model_cfg, rngs=nnx.Rngs(0))
-    # gemma's adaRMS modulation Dense layers are zero-initialized (adaLN-zero), so at fresh
-    # init the cond pathway is a numerical no-op and no state perturbation could ever move the
-    # loss. Perturb every "Dense_0" param (the adaRMS modulation layers inside RMSNorm) so the
-    # per-branch state conditioning is actually exercised by the loss-level tests below.
+    # Two independent zero-inits sit between the state and the loss, and either one alone
+    # makes the state pathway a numerical no-op at fresh init:
+    #   1. gemma's adaRMS modulation Dense layers (adaLN-zero) -- the "Dense_0" params.
+    #   2. state_mlp_out, zero-initialized so state_emb == 0 at step 0 (residual-branch
+    #      init, added in dc8cd92; rationale in Pi0.__init__).
+    # Perturb both, so the loss-level tests below exercise the TRAINED regime of the
+    # per-branch state conditioning rather than its deliberately-inert init.
     graphdef, state = nnx.split(m)
     pure = state.to_pure_dict()
     counter = iter(range(1_000_000))
 
+    _live_state_branch = ("Dense_0", "state_mlp_out")
+
     def perturb(path, x):
-        if any(getattr(p, "key", None) == "Dense_0" for p in path):
+        if any(getattr(p, "key", None) in _live_state_branch for p in path):
             key = jax.random.fold_in(jax.random.key(123), next(counter))
             return x + 0.05 * jax.random.normal(key, x.shape, x.dtype)
         return x

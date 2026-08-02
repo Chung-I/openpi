@@ -146,7 +146,14 @@ class ModelTransformFactory(GroupFactory):
                         _transforms.ResizeImages(224, 224),
                         _transforms.TokenizePrompt(
                             _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
-                            discrete_state_input=model_config.discrete_state_input,
+                            # state_cond_keep_prompt_state means the pretrained discrete prompt
+                            # channel is RETAINED alongside the AdaRMS branch, so the prompt must
+                            # still carry state -- TokenizePrompt only passes state through when
+                            # discrete_state_input is set, and every state_cond config sets it
+                            # False. Without this the prompt silently degrades to the pi0 format
+                            # (no state section AND no pi05 no-state section).
+                            discrete_state_input=model_config.discrete_state_input
+                            or (model_config.state_cond and model_config.state_cond_keep_prompt_state),
                             # VLASH: when state_cond is on, state reaches the model via AdaRMS
                             # conditioning, so the prompt should use the pi05_no_state format
                             # rather than duplicating state as a discrete token section.

@@ -894,6 +894,36 @@ _CONFIGS = [
             ),
         ),
     ),
+    TrainConfig(
+        # STEP-0 PROBE: released checkpoint served through the state_cond architecture with
+        # zero training. Prompt state RETAINED, so with the zero-initialized state_mlp_out
+        # this must be behaviourally identical to the released baseline (~96% on RoboLab
+        # BananaInBowl). Its sibling (pi05_droid_jointpos_vlash_serve, prompt state stripped)
+        # measures what discarding the pretrained prompt channel alone costs.
+        name="pi05_droid_jointpos_step0_keepprompt",
+        project_name="vlash-droid",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=15,
+            state_cond=True,
+            state_cond_keep_prompt_state=True,
+            discrete_state_input=False,
+        ),
+        data=SimpleDataConfig(
+            assets=AssetsConfig(asset_id="droid"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[droid_policy.DroidInputs(model_type=ModelType.PI05)],
+                outputs=[
+                    _transforms.AbsoluteActions(_transforms.make_bool_mask(7, -1)),
+                    droid_policy.DroidOutputs(),
+                ],
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+    ),
     # Shared-observation variant (Task 4, opt-in): identical to pi05_droid_jointpos_vlash
     # except every batch element carries ALL `delta_max + 1` offset branches and the prefix
     # forward pass is shared across them (Pi0.compute_loss_shared_obs, KV-broadcast). NOTE:

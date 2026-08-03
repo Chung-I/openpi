@@ -22,7 +22,13 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=100G
-#SBATCH --time=04:00:00
+# 12h, not 4h: a full 15-cell RoboLab sweep runs ~7h of wall clock, and on
+# 2026-08-03 both serve pairs hit the old 4h limit mid-sweep. The client only
+# sees a dead socket, so the driver burned its two retries in 40 seconds and
+# recorded 0/0 -- cells 10, 12 and 13 produced no episodes at all, and cell 9
+# was truncated at n=24. The 8gpus partition allows up to 48h for a 1-GPU job,
+# so the short limit bought nothing.
+#SBATCH --time=12:00:00
 #SBATCH --output=/work/roboleon1295/openpi-vlash/logs/vlash_serve_%j.log
 set -x
 

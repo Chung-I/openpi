@@ -1191,7 +1191,13 @@ _CONFIGS = [
             action_dim=32,
             action_horizon=16,
             state_cond=False,
-            discrete_state_input=False,
+            # MUST be True, and this config had it False -- which produced neither
+            # pi0.5 prompt format: TokenizePrompt got state=None (no "State:"
+            # section) while pi05_no_state stayed False (no no-state section
+            # either), i.e. the pi0 format. Same defect as BUG 4. As the control
+            # for the RELEASED checkpoint this config has to match its prompt
+            # exactly, and the released one serves with discrete_state_input=True.
+            discrete_state_input=True,
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
         ),

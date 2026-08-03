@@ -33,6 +33,7 @@ class Policy(BasePolicy):
         metadata: dict[str, Any] | None = None,
         pytorch_device: str = "cpu",
         is_pytorch: bool = False,
+        norm_stats: dict | None = None,
     ):
         """Initialize the Policy.
 
@@ -64,10 +65,29 @@ class Policy(BasePolicy):
             self._sample_actions = nnx_utils.module_jit(model.sample_actions)
             self._rng = rng or jax.random.key(0)
 
+        # --- Real-Time Chunking (arXiv 2506.07339) serving support ----------------
+        # Active only when a request carries "rtc/*" keys AND the model implements
+        # sample_actions_rtc. The server (not the client) caches each env's previous
+        # chunk in MODEL space plus the raw joint state it was anchored on, because
+        # re-expressing the previous chunk in the new request's delta frame needs the
+        # action norm stats -- which live here, not on the client.
+        self._norm_stats = norm_stats
+        self._rtc_prev: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        self._sample_actions_rtc = None
+        if not is_pytorch and hasattr(model, "sample_actions_rtc"):
+            self._sample_actions_rtc = nnx_utils.module_jit(model.sample_actions_rtc)
+
     @override
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
+        # RTC control fields ride alongside the observation; strip them before the
+        # input transforms (which expect only observation keys). Also capture the raw
+        # joint state -- the delta frame of this request -- before any transform runs.
+        rtc = {k[4:]: inputs.pop(k) for k in list(inputs) if k.startswith("rtc/")}
+        raw_joints = None
+        if "observation/joint_position" in inputs:
+            raw_joints = np.asarray(inputs["observation/joint_position"], dtype=np.float64).copy()
         inputs = self._input_transform(inputs)
         if not self._is_pytorch_model:
             # Make a batch and convert to jax.Array.
@@ -89,9 +109,40 @@ class Policy(BasePolicy):
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
+        env_id = int(rtc.get("env_id", 0)) if rtc else 0
+        use_rtc = bool(rtc) and self._sample_actions_rtc is not None and env_id in self._rtc_prev
+        if use_rtc:
+            prev_model, prev_joints = self._rtc_prev[env_id]
+            horizon = prev_model.shape[0]
+            d = int(rtc["inference_delay"])
+            pah = int(rtc.get("prefix_attention_horizon", horizon - int(rtc["executed"])))
+            shift = int(rtc["executed"])
+            # Align the previous chunk to this request's frame: index 0 = this request's
+            # observation time. Pad the tail by edge-repeat; weights are zero there.
+            aligned = np.concatenate([prev_model[shift:], np.repeat(prev_model[-1:], shift, axis=0)], axis=0)
+            # Re-anchor the joint deltas (dims 0..6) from the previous request's state to
+            # this one's. Quantile normalization is affine, so the shift is exact:
+            # y_norm += 2*(s_prev - s_new)/(q99 - q01 + eps).
+            if raw_joints is not None and self._norm_stats is not None and prev_joints is not None:
+                stats = self._norm_stats["actions"]
+                scale = 2.0 / (np.asarray(stats.q99)[:7] - np.asarray(stats.q01)[:7] + 1e-6)
+                aligned[:, :7] = aligned[:, :7] + (prev_joints - raw_joints) * scale
+            weights = _rtc_prefix_weights(d, pah, horizon)
+            actions = self._sample_actions_rtc(
+                sample_rng_or_pytorch_device,
+                observation,
+                jnp.asarray(aligned)[np.newaxis, ...],
+                jnp.asarray(weights),
+                **{k: v for k, v in sample_kwargs.items() if k != "noise"},
+            )
+        else:
+            actions = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
+        if rtc:
+            # Cache this chunk (model space) and its anchor state for the next request.
+            self._rtc_prev[env_id] = (np.asarray(actions[0], dtype=np.float64), raw_joints)
         outputs = {
             "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
+            "actions": actions,
         }
         model_time = time.monotonic() - start_time
         if self._is_pytorch_model:
@@ -108,6 +159,28 @@ class Policy(BasePolicy):
     @property
     def metadata(self) -> dict[str, Any]:
         return self._metadata
+
+
+def _rtc_prefix_weights(start: int, end: int, total: int, schedule: str = "exp") -> np.ndarray:
+    """Numpy port of get_prefix_weights (real-time-chunking-kinetix/src/model.py:40).
+
+    start=inference_delay (frozen region, weight 1), end=prefix_attention_horizon
+    (weights 0 from here on), exponential decay in between. Computed host-side so the
+    jitted RTC sampler takes only arrays.
+    """
+    start = min(start, end)
+    idx = np.arange(total, dtype=np.float64)
+    if schedule == "ones":
+        w = np.ones(total)
+    elif schedule == "zeros":
+        w = (idx < start).astype(np.float64)
+    elif schedule in ("linear", "exp"):
+        w = np.clip((start - 1 - idx) / (end - start + 1) + 1, 0, 1)
+        if schedule == "exp":
+            w = w * np.expm1(w) / (np.e - 1)
+    else:
+        raise ValueError(f"Invalid schedule: {schedule}")
+    return np.where(idx >= end, 0.0, w)
 
 
 class PolicyRecorder(_base_policy.BasePolicy):

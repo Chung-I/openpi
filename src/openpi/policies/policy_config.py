@@ -91,4 +91,7 @@ def create_trained_policy(
         metadata=train_config.policy_metadata,
         is_pytorch=is_pytorch,
         pytorch_device=pytorch_device if is_pytorch else None,
+        # RTC serving needs the action stats to re-anchor the previous chunk into the
+        # new request's delta frame (see Policy.infer).
+        norm_stats=norm_stats,
     )

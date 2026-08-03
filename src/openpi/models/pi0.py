@@ -447,3 +447,87 @@ class Pi0(_model.BaseModel):
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
         return x_0
+
+    def sample_actions_rtc(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        prev_actions: at.Float[at.Array, "b ah ad"],
+        prefix_weights: at.Float[at.Array, " ah"],
+        *,
+        max_guidance_weight: float = 5.0,
+        num_steps: int | at.Int[at.Array, ""] = 10,
+    ) -> _model.Actions:
+        """Real-Time Chunking (arXiv 2506.07339): guided inpainting against the previous chunk.
+
+        Port of `realtime_action` from the reference implementation
+        (real-time-chunking-kinetix/src/model.py), with two adaptations:
+          * TIME CONVENTION: the reference uses t: 0=noise -> 1=target; this codebase uses
+            tau: 1=noise -> 0=target (see sample_actions). The guidance constants below are
+            the reference's with t := 1 - tau; the one-step denoiser is x0_hat = x_t - tau*v.
+          * `prefix_weights` (the soft mask, get_prefix_weights in the reference) is computed
+            HOST-SIDE by the caller and passed as an array, keeping this function jittable
+            without static string/int arguments.
+
+        `prev_actions` must already be aligned to this request's frame: index 0 = this
+        request's observation time, and -- because this model's actions are normalized
+        DELTAS anchored on the state sent in the request -- re-expressed against THIS
+        request's state (the caller applies the affine quantile-space shift; the reference
+        has no such anchoring, so this trap is invisible there). The vjp runs through the
+        full suffix pass once per denoising step (~2x cost per step).
+        """
+        observation = _model.preprocess_observation(None, observation, train=False)
+        dt = -1.0 / num_steps
+        batch_size = observation.state.shape[0]
+        noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
+
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+
+        def v_of(x_t, time):
+            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
+                observation, x_t, jnp.broadcast_to(time, batch_size)
+            )
+            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+            prefix_attn = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
+            full_attn_mask = jnp.concatenate([prefix_attn, suffix_attn_mask], axis=-1)
+            pos = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+            (_, suffix_out), _ = self.PaliGemma.llm(
+                [None, suffix_tokens],
+                mask=full_attn_mask,
+                positions=pos,
+                kv_cache=kv_cache,
+                adarms_cond=[None, adarms_cond],
+            )
+            return self.action_out_proj(suffix_out[:, -self.action_horizon :])
+
+        def step(carry):
+            x_t, tau = carry
+
+            def denoiser(x):
+                v = v_of(x, tau)
+                return x - tau * v, v  # one-step estimate of the target chunk
+
+            x0_hat, vjp_fun, v_t = jax.vjp(denoiser, x_t, has_aux=True)
+            error = (prev_actions - x0_hat) * prefix_weights[None, :, None]
+            correction = vjp_fun(error)[0]
+            # Reference constants with t := 1 - tau. At tau=1 (pure noise) c -> inf and is
+            # clipped to max_guidance_weight; guidance vanishes as tau -> 0.
+            t = 1.0 - tau
+            inv_r2 = (t**2 + (1.0 - t) ** 2) / ((1.0 - t) ** 2)
+            c = jnp.nan_to_num((1.0 - t) / t, posinf=max_guidance_weight)
+            guidance_weight = jnp.minimum(c * inv_r2, max_guidance_weight)
+            # SIGN FLIP vs the reference: it integrates with dt > 0, so `v + gw*corr`
+            # advances the state ALONG the correction. Our dt is negative, so the
+            # correction must be subtracted for dt*(-gw*corr) to point toward y.
+            # (test_guidance_pulls_toward_prev_chunk caught the unflipped version.)
+            return x_t + dt * (v_t - guidance_weight * correction), tau + dt
+
+        def cond_rtc(carry):
+            _, tau = carry
+            return tau >= -dt / 2
+
+        x_0, _ = jax.lax.while_loop(cond_rtc, step, (noise, 1.0))
+        return x_0

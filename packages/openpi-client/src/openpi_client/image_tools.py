@@ -56,3 +56,47 @@ def _resize_with_pad_pil(image: Image.Image, height: int, width: int, method: in
     zero_image.paste(resized_image, (pad_width, pad_height))
     assert zero_image.size == (width, height)
     return zero_image
+
+
+# --- wire compression -------------------------------------------------------
+# Observations cross an SSH tunnel to the cluster as raw uint8 arrays: two
+# 224x224x3 images msgpack to 294 KB per request. Measured on a 16-env RoboLab
+# sweep, transfer was ~173 ms of a ~560 ms round trip. JPEG at q=95 cuts the
+# payload ~12x, so the tunnel stops being a meaningful share of it.
+#
+# The encoding is DELIBERATELY explicit rather than automatic: images are wrapped
+# in a marker dict so the server can tell an encoded image from a plain array and
+# decode only what was encoded. Old clients keep working unchanged -- a request
+# with no marker is passed straight through.
+#
+# Note JPEG is lossy. q=95 is visually indistinguishable and DROID's own training
+# frames are JPEG-compressed video, so the artifacts are in distribution -- but
+# it is NOT bit-identical, so any adoption must be equivalence-tested on success
+# rate rather than assumed.
+
+_JPEG_KEY = "__jpeg__"
+
+
+def encode_jpeg(img: np.ndarray, quality: int = 95) -> dict:
+    """Wrap a HxWx3 uint8 image as a JPEG-encoded marker dict for the wire."""
+    import io
+
+    buf = io.BytesIO()
+    Image.fromarray(convert_to_uint8(img)).save(buf, format="JPEG", quality=quality)
+    return {_JPEG_KEY: buf.getvalue()}
+
+
+def decode_jpeg(value):
+    """Inverse of `encode_jpeg`. Anything that is not a marker dict passes through."""
+    import io
+
+    if isinstance(value, dict) and _JPEG_KEY in value:
+        return np.asarray(Image.open(io.BytesIO(value[_JPEG_KEY])).convert("RGB"))
+    return value
+
+
+def decode_tree(obs: dict) -> dict:
+    """Decode every JPEG-marked entry in an observation dict; leave the rest alone."""
+    if not isinstance(obs, dict):
+        return obs
+    return {k: decode_jpeg(v) for k, v in obs.items()}

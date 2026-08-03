@@ -5,6 +5,7 @@ import time
 import traceback
 
 from openpi_client import base_policy as _base_policy
+from openpi_client import image_tools as _image_tools
 from openpi_client import msgpack_numpy
 import websockets.asyncio.server as _server
 import websockets.frames
@@ -56,6 +57,9 @@ class WebsocketPolicyServer:
             try:
                 start_time = time.monotonic()
                 obs = msgpack_numpy.unpackb(await websocket.recv())
+                # Decode any JPEG-marked images. A request that carries none is
+                # returned unchanged, so pre-existing clients are unaffected.
+                obs = _image_tools.decode_tree(obs)
 
                 infer_time = time.monotonic()
                 action = self._policy.infer(obs)

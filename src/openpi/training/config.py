@@ -1237,7 +1237,11 @@ _CONFIGS = [
             decay_lr=5e-5,
         ),
         num_train_steps=20_000,
-        vlash_val_interval=1000,
+        # None, not 1000: this control trains with vlash_delta_max=0, so a per-offset
+        # validation loss has exactly one offset and measures nothing -- and on cml18
+        # (fsdp=3) the hook's fixed val batch is not divisible by the mesh, which
+        # crashed the run at startup (device_put NamedSharding ValueError).
+        vlash_val_interval=None,
         batch_size=32,
         num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
         # Turn off EMA for LoRA finetuning (matches pi0_libero_low_mem_finetune convention).

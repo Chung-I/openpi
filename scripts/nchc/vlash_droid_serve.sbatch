@@ -18,7 +18,10 @@
 #
 #SBATCH --job-name=vlash_serve
 #SBATCH --account=MST114563
-#SBATCH --partition=dev
+# 8gpus, not dev: dev caps every job at 4h (sinfo TIMELIMIT), which is where the
+# old 4h serve limit came from -- and it is shorter than a 15-cell sweep. 8gpus
+# allows 2 days for a 1-GPU job.
+#SBATCH --partition=8gpus
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=100G

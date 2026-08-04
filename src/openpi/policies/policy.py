@@ -76,6 +76,9 @@ class Policy(BasePolicy):
         self._sample_actions_rtc = None
         if not is_pytorch and hasattr(model, "sample_actions_rtc"):
             self._sample_actions_rtc = nnx_utils.module_jit(model.sample_actions_rtc)
+        self._sample_actions_ttrtc = None
+        if not is_pytorch and hasattr(model, "sample_actions_ttrtc"):
+            self._sample_actions_ttrtc = nnx_utils.module_jit(model.sample_actions_ttrtc)
 
     @override
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
@@ -127,14 +130,24 @@ class Policy(BasePolicy):
                 stats = self._norm_stats["actions"]
                 scale = 2.0 / (np.asarray(stats.q99)[:7] - np.asarray(stats.q01)[:7] + 1e-6)
                 aligned[:, :7] = aligned[:, :7] + (prev_joints - raw_joints) * scale
-            weights = _rtc_prefix_weights(d, pah, horizon)
-            actions = self._sample_actions_rtc(
-                sample_rng_or_pytorch_device,
-                observation,
-                jnp.asarray(aligned)[np.newaxis, ...],
-                jnp.asarray(weights),
-                **{k: v for k, v in sample_kwargs.items() if k != "noise"},
-            )
+            if rtc.get("mode") == "ttrtc" and self._sample_actions_ttrtc is not None:
+                # TT-RTC: hard prefix conditioning, no guidance weights.
+                actions = self._sample_actions_ttrtc(
+                    sample_rng_or_pytorch_device,
+                    observation,
+                    jnp.asarray(aligned)[np.newaxis, ...],
+                    d,
+                    **{k: v for k, v in sample_kwargs.items() if k != "noise"},
+                )
+            else:
+                weights = _rtc_prefix_weights(d, pah, horizon)
+                actions = self._sample_actions_rtc(
+                    sample_rng_or_pytorch_device,
+                    observation,
+                    jnp.asarray(aligned)[np.newaxis, ...],
+                    jnp.asarray(weights),
+                    **{k: v for k, v in sample_kwargs.items() if k != "noise"},
+                )
         else:
             actions = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
         if rtc:

@@ -82,6 +82,7 @@ class Pi0(_model.BaseModel):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.pi05 = config.pi05
         self.state_cond = config.state_cond
+        self.ttrtc_delay_max = config.ttrtc_delay_max
         self.vlash_shared_obs = config.vlash_shared_obs
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
@@ -173,12 +174,15 @@ class Pi0(_model.BaseModel):
 
     @at.typecheck
     def embed_suffix(
-        self, obs: _model.Observation, noisy_actions: _model.Actions, timestep: at.Float[at.Array, " b"]
+        self,
+        obs: _model.Observation,
+        noisy_actions: _model.Actions,
+        timestep: at.Float[at.Array, " b"] | at.Float[at.Array, "b ah"],
     ) -> tuple[
         at.Float[at.Array, "b s emb"],
         at.Bool[at.Array, "b s"],
         at.Bool[at.Array, " s"],
-        at.Float[at.Array, "b emb"] | None,
+        at.Float[at.Array, "b emb"] | at.Float[at.Array, "b ah emb"] | None,
     ]:
         return self._embed_suffix(obs.state, noisy_actions, timestep)
 
@@ -187,12 +191,12 @@ class Pi0(_model.BaseModel):
         self,
         state: at.Float[at.Array, "b st"],
         noisy_actions: at.Float[at.Array, "b ah ad"],
-        timestep: at.Float[at.Array, " b"],
+        timestep: at.Float[at.Array, " b"] | at.Float[at.Array, "b ah"],
     ) -> tuple[
         at.Float[at.Array, "b s emb"],
         at.Bool[at.Array, "b s"],
         at.Bool[at.Array, " s"],
-        at.Float[at.Array, "b emb"] | None,
+        at.Float[at.Array, "b emb"] | at.Float[at.Array, "b ah emb"] | None,
     ]:
         """State-array variant of `embed_suffix` so the shared-obs path can feed per-branch
         rolled states (flattened to the batch axis) without constructing a fake Observation."""
@@ -208,8 +212,16 @@ class Pi0(_model.BaseModel):
             ar_mask += [True]
 
         action_tokens = self.action_in_proj(noisy_actions)
-        # embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1]
-        time_emb = posemb_sincos(timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0)
+        # embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1].
+        # timestep may be [b] (stock: one flow time per sample) or [b, ah] (TT-RTC: per-token
+        # flow time, prefix tokens pinned at 0.0 = fully denoised in this codebase's convention).
+        if timestep.ndim == 2:
+            b, ah = timestep.shape
+            time_emb = posemb_sincos(
+                timestep.reshape(-1), self.action_in_proj.out_features, min_period=4e-3, max_period=4.0
+            ).reshape(b, ah, -1)
+        else:
+            time_emb = posemb_sincos(timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0)
         if self.pi05:
             # time MLP (for adaRMS)
             time_emb = self.time_mlp_in(time_emb)
@@ -222,6 +234,8 @@ class Pi0(_model.BaseModel):
                 state_emb = self.state_proj(state)
                 state_emb = nnx.swish(self.state_mlp_in(state_emb))
                 state_emb = nnx.swish(self.state_mlp_out(state_emb))
+                if adarms_cond.ndim == 3:
+                    state_emb = state_emb[:, None, :]  # broadcast over per-token time
                 adarms_cond = adarms_cond + state_emb
         else:
             # mix timestep + action information using an MLP (no adaRMS)
@@ -264,6 +278,8 @@ class Pi0(_model.BaseModel):
         """
         if self.vlash_shared_obs:
             return self.compute_loss_shared_obs(rng, observation, actions, train=train, noise=noise, time=time)
+        if self.ttrtc_delay_max is not None:
+            return self._compute_loss_ttrtc(rng, observation, actions, train=train, noise=noise, time=time)
         return self._compute_loss_single(rng, observation, actions, train=train, noise=noise, time=time)
 
     def _compute_loss_single(
@@ -302,6 +318,111 @@ class Pi0(_model.BaseModel):
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+
+    def _compute_loss_ttrtc(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        actions: _model.Actions,
+        *,
+        train: bool = False,
+        noise: at.Float[at.Array, "*b ah ad"] | None = None,
+        time: at.Float[at.Array, "*b"] | None = None,
+        delay: at.Int[at.Array, " b"] | None = None,
+    ) -> at.Float[at.Array, "*b ah"]:
+        """TT-RTC training loss (arXiv 2512.05964; reference kinetix loss(), simulated_delay
+        branch). Per-example delay d is sampled with exponentially decaying probability over
+        {0..D-1}; the first d action tokens become a ground-truth prefix pinned at flow time
+        0.0 (THIS codebase's fully-denoised end -- the reference pins at 1.0, its target
+        end), and the loss is masked to the postfix, rescaled so the caller's mean over the
+        [b, ah] output equals the reference's masked mean. `delay` is injectable for tests.
+        """
+        preprocess_rng, noise_rng, time_rng, delay_rng = jax.random.split(rng, 4)
+        observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
+        batch = actions.shape[0]
+        ah = self.action_horizon
+        if noise is None:
+            noise = jax.random.normal(noise_rng, actions.shape)
+        if time is None:
+            time = jax.random.beta(time_rng, 1.5, 1, (batch,)) * 0.999 + 0.001
+        if delay is None:
+            d_max = self.ttrtc_delay_max
+            w = jnp.exp(jnp.arange(d_max, dtype=jnp.float32)[::-1])
+            delay = jax.random.choice(delay_rng, d_max, (batch,), p=w / jnp.sum(w))
+        prefix = jnp.arange(ah)[None, :] < delay[:, None]  # [b, ah] True on prefix tokens
+        time_tok = jnp.where(prefix, 0.0, time[:, None])  # per-token flow time
+        x_t = time_tok[..., None] * noise + (1 - time_tok[..., None]) * actions
+        u_t = noise - actions
+
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time_tok)
+        input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
+        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
+        attn_mask = make_attn_mask(input_mask, ar_mask)
+        positions = jnp.cumsum(input_mask, axis=1) - 1
+        (_, suffix_out), _ = self.PaliGemma.llm(
+            [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
+        )
+        v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+
+        per_step = jnp.mean(jnp.square(v_t - u_t), axis=-1)  # [b, ah]
+        keep = jnp.logical_not(prefix)
+        n_keep = jnp.maximum(jnp.sum(keep, axis=-1, keepdims=True), 1)
+        return per_step * keep * (ah / n_keep)
+
+    def sample_actions_ttrtc(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        prev_actions: at.Float[at.Array, "b ah ad"],
+        inference_delay: int,
+        *,
+        num_steps: int | at.Int[at.Array, ""] = 10,
+    ) -> _model.Actions:
+        """TT-RTC inference: hard prefix conditioning (reference realtime_action, the
+        simulated_delay branch). The first `inference_delay` tokens are pinned to the
+        committed `prev_actions` (aligned to this request's frame by the caller, same
+        contract as sample_actions_rtc) at flow time 0.0; the postfix denoises normally.
+        No vjp, no guidance -- zero inference overhead vs the plain sampler.
+        """
+        observation = _model.preprocess_observation(None, observation, train=False)
+        dt = -1.0 / num_steps
+        batch_size = observation.state.shape[0]
+        noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
+        prefix = (jnp.arange(self.action_horizon) < inference_delay)[None, :]  # [1, ah]
+
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+
+        def step(carry):
+            x_t, tau = carry
+            x_t = jnp.where(prefix[..., None], prev_actions, x_t)
+            time_tok = jnp.where(prefix, 0.0, jnp.broadcast_to(tau, (batch_size, self.action_horizon)))
+            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
+                observation, x_t, time_tok
+            )
+            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+            pa = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
+            full_attn_mask = jnp.concatenate([pa, suffix_attn_mask], axis=-1)
+            pos = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+            (_, suffix_out), _ = self.PaliGemma.llm(
+                [None, suffix_tokens],
+                mask=full_attn_mask,
+                positions=pos,
+                kv_cache=kv_cache,
+                adarms_cond=[None, adarms_cond],
+            )
+            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            return x_t + dt * v_t, tau + dt
+
+        def cond_t(carry):
+            _, tau = carry
+            return tau >= -dt / 2
+
+        x_0, _ = jax.lax.while_loop(cond_t, step, (noise, 1.0))
+        return jnp.where(prefix[..., None], prev_actions, x_0)
 
     def compute_loss_shared_obs(
         self,

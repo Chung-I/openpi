@@ -32,6 +32,12 @@ class Pi0Config(_model.BaseModelConfig):
     # When True (pi05 only), condition adaRMS on robot state (in addition to the flow-matching
     # timestep) via a fresh state_proj/state_mlp_in/state_mlp_out tower. Requires pi05=True.
     state_cond: bool = False
+    # TT-RTC (arXiv 2512.05964): when set, training simulates inference delay by
+    # conditioning on ground-truth action prefixes (per-token flow time; loss on the
+    # postfix only). Value = D means per-example delays are sampled from {0..D-1}
+    # with exponentially decaying probability (reference: real-time-chunking-kinetix
+    # src/model.py loss()). Serving uses sample_actions_ttrtc.
+    ttrtc_delay_max: int | None = None
     # When state_cond is on, vlash REPLACES the discrete prompt-state channel with the AdaRMS
     # branch. That is right for adapting a generalist into a new domain (vlash's LIBERO case),
     # but it discards information a specialized checkpoint was pretrained to use. Setting this

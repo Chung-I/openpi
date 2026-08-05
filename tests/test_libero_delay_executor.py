@@ -89,3 +89,25 @@ def test_guards():
     ex = DelayedChunkExecutor(FakeClient(), "naive", 3, 8, env_id=1)
     with pytest.raises(AssertionError, match="too short"):
         ex.act({"s": 0})
+
+
+def test_vlash_naive_stale_snapshot():
+    """vlash-protocol arm: request uses the obs from `delay` acts earlier
+    (images AND state stale), the whole chunk executes from index 0."""
+
+    class ObsClient(FakeClient):
+        def infer(self, element):
+            r = len(self.requests)
+            self.requests.append(dict(element))
+            return {"actions": np.arange(H, dtype=np.float64)[:, None] + 100.0 * r}
+
+    client = ObsClient()
+    ex = DelayedChunkExecutor(client, "vlash_naive", 3, H, env_id=1)
+    acts = [float(ex.act({"step": i})[0]) for i in range(2 * H + 3)]
+    # full chunks, no overlap: c0[0:10] then c1[0:10]
+    assert acts[:10] == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert acts[10:20] == [100 + i for i in range(10)]
+    # first request had no history -> fresh obs (step 0); second request (at
+    # act index 10) must use the snapshot from 3 acts earlier: step 7
+    assert client.requests[0]["step"] == 0
+    assert client.requests[1]["step"] == 7

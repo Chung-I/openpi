@@ -62,21 +62,37 @@ class DelayedChunkExecutor:
     """Client-side emulation of async inference timing (single env, stepped sim)."""
 
     def __init__(self, client, arm: str, delay: int, execute_horizon: int, env_id: int):
-        assert arm in ("sync", "naive", "rtc"), arm
+        assert arm in ("sync", "naive", "rtc", "vlash_naive"), arm
         if arm == "sync":
             assert delay == 0, "sync arm is delay-0 by definition"
         self.client = client
         self.arm = arm
         self.delay = delay
         self.k = execute_horizon
-        assert self.delay <= self.k, "delay must fit in the execute window"
+        if arm != "vlash_naive":
+            assert self.delay <= self.k, "delay must fit in the execute window"
         self.env_id = env_id
         self.chunk = None  # remaining actions committed for execution
         self.prev_full = None  # previous full chunk (request frame)
+        # vlash_naive (vlash benchmarks/libero/executor.py convention): the
+        # request is emulated as issued `delay` steps BEFORE the chunk switch,
+        # so it uses the observation snapshot from then (images AND state
+        # stale), and the whole chunk executes from index 0 -- no overlap.
+        self.obs_history = collections.deque(maxlen=max(delay + 1, 1))
 
     def act(self, element: dict) -> np.ndarray:
         """Returns the next action; requests a new chunk when the buffer empties."""
         if self.chunk is None or len(self.chunk) == 0:
+            if self.arm == "vlash_naive":
+                # snapshot from `delay` act-calls before this switch (their
+                # executor snapshots at idx == k - delay of the prior chunk)
+                stale_ready = self.delay > 0 and len(self.obs_history) >= self.delay
+                use = self.obs_history[-self.delay] if stale_ready else element
+                full = np.asarray(self.client.infer(use)["actions"])
+                assert len(full) >= self.k, (len(full), self.k)
+                self.chunk = collections.deque(full[: self.k])
+                self.obs_history.append(dict(element))
+                return self.chunk.popleft()
             if self.arm == "rtc":
                 element = dict(element)
                 element["rtc/mode"] = "rtc"
@@ -102,6 +118,7 @@ class DelayedChunkExecutor:
                 committed = np.concatenate([self.prev_full[self.k : self.k + self.delay], full[self.delay : self.k]])
             self.prev_full = full
             self.chunk = collections.deque(committed)
+        self.obs_history.append(dict(element))
         return self.chunk.popleft()
 
 

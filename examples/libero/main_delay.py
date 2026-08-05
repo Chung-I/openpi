@@ -27,12 +27,6 @@ import numpy as np
 import tqdm
 import tyro
 
-from libero.libero import benchmark
-from libero.libero import get_libero_path
-from libero.libero.envs import OffScreenRenderEnv
-from openpi_client import image_tools
-from openpi_client import websocket_client_policy as _websocket_client_policy
-
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256
 
@@ -112,6 +106,12 @@ class DelayedChunkExecutor:
 
 
 def eval_libero(args: Args) -> None:
+    # deferred imports: keep DelayedChunkExecutor importable (and testable)
+    # without the libero/robosuite stack installed
+    from libero.libero import benchmark
+    from openpi_client import image_tools
+    from openpi_client import websocket_client_policy as _websocket_client_policy
+
     np.random.seed(args.seed)
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[args.task_suite_name]()
@@ -200,6 +200,9 @@ def eval_libero(args: Args) -> None:
 
 
 def _get_libero_env(task, resolution, seed):
+    from libero.libero import get_libero_path
+    from libero.libero.envs import OffScreenRenderEnv
+
     task_description = task.language
     task_bddl_file = pathlib.Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
     env = OffScreenRenderEnv(bddl_file_name=task_bddl_file, camera_heights=resolution, camera_widths=resolution)

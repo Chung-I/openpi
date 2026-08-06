@@ -57,6 +57,13 @@ class Args:
     out_path: str = "data/libero/delay_results.jsonl"
     skip_done: bool = True  # skip (task, episode) pairs already in out_path
 
+    # LIBERO-plus support: evaluate only tasks whose bddl or init-state file
+    # matches this regex (e.g. "_level" for camera variants, "_noise_" for
+    # robot-init variants); shard the surviving task list across workers.
+    task_filter: str = ""
+    shard_index: int = 0
+    shard_count: int = 1
+
 
 class DelayedChunkExecutor:
     """Client-side emulation of async inference timing (single env, stepped sim)."""
@@ -147,9 +154,22 @@ def eval_libero(args: Args) -> None:
 
     client = _websocket_client_policy.WebsocketClientPolicy(args.host, args.port)
 
+    import re
+    task_ids = list(range(task_suite.n_tasks))
+    if args.task_filter:
+        rx = re.compile(args.task_filter)
+        task_ids = [
+            i
+            for i in task_ids
+            if rx.search(task_suite.get_task(i).bddl_file)
+            or rx.search(getattr(task_suite.get_task(i), "init_states_file", "") or "")
+        ]
+    task_ids = task_ids[args.shard_index :: args.shard_count]
+    print(f"evaluating {len(task_ids)} tasks (filter={args.task_filter!r} shard {args.shard_index}/{args.shard_count})")
+
     episode_counter = 0
     total, wins = 0, 0
-    for task_id in tqdm.tqdm(range(task_suite.n_tasks)):
+    for task_id in tqdm.tqdm(task_ids):
         task = task_suite.get_task(task_id)
         initial_states = task_suite.get_task_init_states(task_id)
         env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed)

@@ -172,8 +172,23 @@ def eval_libero(args: Args) -> None:
     for task_id in tqdm.tqdm(task_ids):
         task = task_suite.get_task(task_id)
         initial_states = task_suite.get_task_init_states(task_id)
-        env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed)
+        try:
+            env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed)
+        except Exception:
+            logging.exception(f"env construction failed for task {task_id}")
+            env, task_description = None, ""
 
+        if env is None:
+            # env construction failed (broken variant) -- record failures, move on
+            for episode_idx in range(args.num_trials_per_task):
+                if (task_id, episode_idx) in done:
+                    continue
+                total += 1
+                with out.open("a") as f:
+                    f.write(json.dumps({"suite": args.task_suite_name, "arm": args.arm, "delay": args.delay,
+                                        "execute_horizon": args.execute_horizon, "task_id": task_id,
+                                        "episode": episode_idx, "success": False, "env_error": True}) + "\n")
+            continue
         for episode_idx in range(args.num_trials_per_task):
             episode_counter += 1
             if (task_id, episode_idx) in done:
@@ -242,7 +257,8 @@ def _get_libero_env(task, resolution, seed):
 
     task_description = task.language
     task_bddl_file = pathlib.Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
-    env = OffScreenRenderEnv(bddl_file_name=task_bddl_file, camera_heights=resolution, camera_widths=resolution)
+    # str() required: LIBERO-plus string-matches on bddl_file_name ("_view_" in ...)
+    env = OffScreenRenderEnv(bddl_file_name=str(task_bddl_file), camera_heights=resolution, camera_widths=resolution)
     env.seed(seed)
     return env, task_description
 

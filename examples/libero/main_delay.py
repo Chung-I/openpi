@@ -63,6 +63,9 @@ class Args:
     task_filter: str = ""
     shard_index: int = 0
     shard_count: int = 1
+    # LIBERO-plus packaging bug workaround: virtual-task language fields carry
+    # the filename suffix ("... view 0 0 100 0 0 initstate 0 noise 3"); strip it.
+    clean_language: bool = False
 
 
 class DelayedChunkExecutor:
@@ -218,7 +221,9 @@ def eval_libero(args: Args) -> None:
                         "observation/state": np.concatenate(
                             (obs["robot0_eef_pos"], _quat2axisangle(obs["robot0_eef_quat"]), obs["robot0_gripper_qpos"])
                         ),
-                        "prompt": str(task_description),
+                        "prompt": re.sub(r"\s+view [\d ]+initstate \d+( noise \d+)?$", "", str(task_description))
+                        if args.clean_language
+                        else str(task_description),
                     }
                     action = executor.act(element)
                     obs, _, done_flag, _ = env.step(action.tolist())
